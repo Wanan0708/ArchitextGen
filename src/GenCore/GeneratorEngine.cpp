@@ -6,8 +6,11 @@
 #include <QDebug>
 #include <QRegularExpression>
 #include <QCoreApplication>
+#include <QStandardPaths>
 
 namespace {
+const char kGeneratedLibraryProjectName[] = "ArchitectGenLibraries";
+
 QString buildIncludeGuard(const QString &className)
 {
     QString guard = className.toUpper();
@@ -101,7 +104,14 @@ QString buildFunctionDeclaration(const FunctionMeta &func, bool includeDefaultVa
 
 QString buildMemberDeclaration(const MemberMeta &member)
 {
-    QString declaration = member.type + " " + member.name;
+    QString declaration;
+    if (member.isConstexpr) {
+        declaration += "static constexpr ";
+    } else if (member.isStatic) {
+        declaration += "static ";
+    }
+
+    declaration += member.type + " " + member.name;
     if (!member.defaultValue.isEmpty()) {
         declaration += " = " + member.defaultValue;
     }
@@ -123,8 +133,213 @@ QString buildSection(const QString &access, const QStringList &lines)
     return section.join("\n") + "\n";
 }
 
+QString normalizeGeneratedText(QString content)
+{
+    content.replace("\r\n", "\n");
+    content.replace(QRegularExpression("[ \t]+\n"), "\n");
+    content.replace(QRegularExpression("\n{3,}"), "\n\n");
+    return content.trimmed() + "\n";
+}
+
+QStringList sourceFilePatterns()
+{
+    return {"*.cpp", "*.cc", "*.cxx"};
+}
+
+QStringList headerFilePatterns()
+{
+    return {"*.h", "*.hpp"};
+}
+
+QStringList listMatchingFiles(const QString &directoryPath, const QStringList &patterns)
+{
+    const QDir directory(directoryPath);
+    return directory.entryList(patterns, QDir::Files, QDir::Name);
+}
+
+QStringList discoverLibraryDomains(const QString &projectRootPath)
+{
+    QStringList domains;
+    const QDir rootDirectory(projectRootPath);
+    const QFileInfoList entries = rootDirectory.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QFileInfo &entry : entries) {
+        if (!listMatchingFiles(entry.absoluteFilePath(), sourceFilePatterns()).isEmpty()) {
+            domains.append(entry.fileName());
+        }
+    }
+    return domains;
+}
+
+QString indentList(const QStringList &items, const QString &indent)
+{
+    QString text;
+    for (const QString &item : items) {
+        text += indent + item + "\n";
+    }
+    return text;
+}
+
+bool writeTextFileIfChanged(const QString &filePath, const QString &content, QString *errorMessage = nullptr)
+{
+    QFile existingFile(filePath);
+    if (existingFile.exists() && existingFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        const QString existingContent = QString::fromUtf8(existingFile.readAll());
+        existingFile.close();
+        if (existingContent == content) {
+            return true;
+        }
+    }
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        if (errorMessage) {
+            *errorMessage = file.errorString();
+        }
+        return false;
+    }
+
+    QTextStream stream(&file);
+    stream << content;
+    file.close();
+    return true;
+}
+
+QString buildRootCMakeContent(const QStringList &domains)
+{
+    QString content;
+    content += "cmake_minimum_required(VERSION 3.16)\n";
+    content += QString("project(%1 VERSION 1.0 LANGUAGES CXX)\n\n").arg(kGeneratedLibraryProjectName);
+    content += "set(CMAKE_CXX_STANDARD 17)\n";
+    content += "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n";
+    content += "set(CMAKE_AUTOMOC ON)\n";
+    content += "set(CMAKE_AUTORCC OFF)\n";
+    content += "set(CMAKE_AUTOUIC OFF)\n\n";
+    content += "include(GNUInstallDirs)\n\n";
+    content += "find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Widgets)\n";
+    content += "find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Widgets)\n\n";
+    content += "set(ARCHITECTGEN_LIBRARY_DOMAINS\n";
+    content += indentList(domains, "    ");
+    content += ")\n\n";
+    content += "foreach(domain IN LISTS ARCHITECTGEN_LIBRARY_DOMAINS)\n";
+    content += "    add_subdirectory(${domain})\n";
+    content += "endforeach()\n\n";
+    content += "include(CMakePackageConfigHelpers)\n";
+    content += "configure_package_config_file(\n";
+    content += "    \"${CMAKE_CURRENT_SOURCE_DIR}/cmake/ArchitectGenLibrariesConfig.cmake.in\"\n";
+    content += "    \"${CMAKE_CURRENT_BINARY_DIR}/ArchitectGenLibrariesConfig.cmake\"\n";
+    content += "    INSTALL_DESTINATION \"${CMAKE_INSTALL_LIBDIR}/cmake/ArchitectGenLibraries\"\n";
+    content += ")\n\n";
+    content += "write_basic_package_version_file(\n";
+    content += "    \"${CMAKE_CURRENT_BINARY_DIR}/ArchitectGenLibrariesConfigVersion.cmake\"\n";
+    content += "    VERSION ${PROJECT_VERSION}\n";
+    content += "    COMPATIBILITY SameMajorVersion\n";
+    content += ")\n\n";
+    content += "install(EXPORT ArchitectGenTargets\n";
+    content += "    FILE ArchitectGenLibrariesTargets.cmake\n";
+    content += "    NAMESPACE ArchitectGen::\n";
+    content += "    DESTINATION \"${CMAKE_INSTALL_LIBDIR}/cmake/ArchitectGenLibraries\"\n";
+    content += ")\n\n";
+    content += "install(FILES\n";
+    content += "    \"${CMAKE_CURRENT_BINARY_DIR}/ArchitectGenLibrariesConfig.cmake\"\n";
+    content += "    \"${CMAKE_CURRENT_BINARY_DIR}/ArchitectGenLibrariesConfigVersion.cmake\"\n";
+    content += "    DESTINATION \"${CMAKE_INSTALL_LIBDIR}/cmake/ArchitectGenLibraries\"\n";
+    content += ")\n";
+    return content;
+}
+
+QString buildDomainCMakeContent(const QString &domainKey, const QStringList &headerFiles, const QStringList &sourceFiles)
+{
+    QString content;
+    content += "# Generated by ArchitectGen. Manual edits may be overwritten.\n\n";
+    content += "set(domain_public_headers\n";
+    content += indentList(headerFiles, "    ");
+    content += ")\n\n";
+    content += "set(domain_sources\n";
+    content += indentList(sourceFiles, "    ");
+    content += ")\n\n";
+    content += QString("add_library(%1\n").arg(domainKey);
+    content += "    ${domain_sources}\n";
+    content += "    ${domain_public_headers}\n";
+    content += ")\n\n";
+    content += QString("add_library(ArchitectGen::%1 ALIAS %1)\n\n").arg(domainKey);
+    content += QString("target_compile_features(%1 PUBLIC cxx_std_17)\n\n").arg(domainKey);
+    content += QString("target_include_directories(%1\n").arg(domainKey);
+    content += "    PUBLIC\n";
+    content += "        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>\n";
+    content += QString("        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/ArchitectGen/%1>\n").arg(domainKey);
+    content += ")\n\n";
+    content += QString("target_link_libraries(%1\n").arg(domainKey);
+    content += "    PUBLIC\n";
+    content += "        Qt${QT_VERSION_MAJOR}::Core\n";
+    content += "        Qt${QT_VERSION_MAJOR}::Widgets\n";
+    content += ")\n\n";
+    content += QString("install(TARGETS %1\n").arg(domainKey);
+    content += "    EXPORT ArchitectGenTargets\n";
+    content += "    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}\n";
+    content += "    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}\n";
+    content += "    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}\n";
+    content += ")\n\n";
+    content += "install(FILES\n";
+    content += "    ${domain_public_headers}\n";
+    content += QString("    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/ArchitectGen/%1\n").arg(domainKey);
+    content += ")\n";
+    return content;
+}
+
+QString buildPackageConfigTemplateContent()
+{
+    QString content;
+    content += "@PACKAGE_INIT@\n\n";
+    content += "include(CMakeFindDependencyMacro)\n\n";
+    content += "if(NOT TARGET Qt6::Core AND NOT TARGET Qt5::Core)\n";
+    content += "    find_dependency(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Widgets)\n";
+    content += "    find_dependency(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Widgets)\n";
+    content += "endif()\n\n";
+    content += "include(\"${CMAKE_CURRENT_LIST_DIR}/ArchitectGenLibrariesTargets.cmake\")\n";
+    return content;
+}
+
+QString buildReadmeContent(const QStringList &domains)
+{
+    QString content;
+    content += "# ArchitectGen Libraries\n\n";
+    content += "This directory is generated by ArchitectGen and can be consumed as a reusable CMake library workspace.\n\n";
+    content += "## Included Domain Libraries\n\n";
+    for (const QString &domain : domains) {
+        content += "- ArchitectGen::" + domain + "\n";
+    }
+    content += "\n## Use In Another Project\n\n";
+    content += "### Option 1: add_subdirectory\n\n";
+    content += "```cmake\n";
+    content += "add_subdirectory(path/to/generated/templates external/architectgen)\n";
+    content += "target_link_libraries(MyApp PRIVATE ArchitectGen::Data_Persistence)\n";
+    content += "```\n\n";
+    content += "### Option 2: install and find_package\n\n";
+    content += "```powershell\n";
+    content += "cmake -S path/to/generated/templates -B build\n";
+    content += "cmake --build build\n";
+    content += "cmake --install build --prefix path/to/install\n";
+    content += "```\n\n";
+    content += "```cmake\n";
+    content += "find_package(ArchitectGenLibraries CONFIG REQUIRED PATHS path/to/install)\n";
+    content += "target_link_libraries(MyApp PRIVATE ArchitectGen::Data_Persistence)\n";
+    content += "```\n";
+    return content;
+}
+
 QString buildClassBody(const ClassMeta &meta)
 {
+    QString body;
+    
+    // 如果有命名空间，生成命名空间声明
+    if (!meta.namespaceStr.isEmpty()) {
+        QStringList nsParts = meta.namespaceStr.split("::");
+        for (const QString &ns : nsParts) {
+            body += "namespace " + ns + " {\n";
+        }
+        body += "\n";
+    }
+    
     QStringList publicLines;
     publicLines << QString("explicit %1(%2parent = nullptr);").arg(meta.className, buildParentType(meta.baseClass));
     publicLines << QString("virtual ~%1();").arg(meta.className);
@@ -169,13 +384,20 @@ QString buildClassBody(const ClassMeta &meta)
         privateLines << privateMemberLines;
     }
 
-    QString body;
     body += buildSection("public", publicLines);
     if (!protectedLines.isEmpty()) {
         body += "\n" + buildSection("protected", protectedLines);
     }
     if (!privateLines.isEmpty()) {
         body += "\n" + buildSection("private", privateLines);
+    }
+    
+    // 如果有命名空间，添加闭合大括号
+    if (!meta.namespaceStr.isEmpty()) {
+        QStringList nsParts = meta.namespaceStr.split("::");
+        for (int i = nsParts.size() - 1; i >= 0; --i) {
+            body += "\n} // namespace " + nsParts[i];
+        }
     }
 
     return body.trimmed() + "\n";
@@ -204,18 +426,211 @@ QString functionDefinitionSignature(const ClassMeta &meta, const FunctionMeta &f
     }
     return signature;
 }
+
+struct FunctionDefinitionMatch
+{
+    int start = -1;
+    int openBrace = -1;
+    int end = -1;
+    QString functionName;
+    QString signature;
+
+    bool isValid() const
+    {
+        return start >= 0 && openBrace >= 0 && end >= openBrace;
+    }
+};
+
+QString normalizeFunctionSignature(QString signature)
+{
+    signature.replace("\r\n", "\n");
+    signature.replace(QRegularExpression("\\s+"), " ");
+    return signature.trimmed();
+}
+
+int findMatchingClosingBrace(const QString &content, int openBraceIndex)
+{
+    if (openBraceIndex < 0 || openBraceIndex >= content.size() || content.at(openBraceIndex) != '{') {
+        return -1;
+    }
+
+    int depth = 0;
+    bool inSingleLineComment = false;
+    bool inMultiLineComment = false;
+    bool inString = false;
+    bool inChar = false;
+    bool escaped = false;
+
+    for (int i = openBraceIndex; i < content.size(); ++i) {
+        const QChar ch = content.at(i);
+        const QChar next = i + 1 < content.size() ? content.at(i + 1) : QChar();
+
+        if (inSingleLineComment) {
+            if (ch == '\n') {
+                inSingleLineComment = false;
+            }
+            continue;
+        }
+
+        if (inMultiLineComment) {
+            if (ch == '*' && next == '/') {
+                inMultiLineComment = false;
+                ++i;
+            }
+            continue;
+        }
+
+        if (inString) {
+            if (!escaped && ch == '"') {
+                inString = false;
+            }
+            escaped = !escaped && ch == '\\';
+            continue;
+        }
+
+        if (inChar) {
+            if (!escaped && ch == '\'') {
+                inChar = false;
+            }
+            escaped = !escaped && ch == '\\';
+            continue;
+        }
+
+        escaped = false;
+
+        if (ch == '/' && next == '/') {
+            inSingleLineComment = true;
+            ++i;
+            continue;
+        }
+
+        if (ch == '/' && next == '*') {
+            inMultiLineComment = true;
+            ++i;
+            continue;
+        }
+
+        if (ch == '"') {
+            inString = true;
+            continue;
+        }
+
+        if (ch == '\'') {
+            inChar = true;
+            continue;
+        }
+
+        if (ch == '{') {
+            ++depth;
+        } else if (ch == '}') {
+            --depth;
+            if (depth == 0) {
+                return i;
+            }
+        }
+    }
+
+    return -1;
+}
+
+QList<FunctionDefinitionMatch> findClassFunctionDefinitions(const QString &content, const QString &className)
+{
+    QList<FunctionDefinitionMatch> matches;
+    const QString pattern = QString("(^|\\n)\\s*[^\\n]*\\b%1::([~A-Za-z_][A-Za-z0-9_]*)\\s*\\([^\\n]*\\)\\s*(?:const\\s*)?\\n?\\s*\\{")
+                                .arg(QRegularExpression::escape(className));
+    QRegularExpression regex(pattern);
+    QRegularExpressionMatchIterator iterator = regex.globalMatch(content);
+    while (iterator.hasNext()) {
+        const QRegularExpressionMatch match = iterator.next();
+        const int fullStart = match.capturedStart(0);
+        const int start = content.lastIndexOf('\n', fullStart >= 0 ? fullStart : 0) + 1;
+        const int openBrace = content.indexOf('{', match.capturedStart(0));
+        const int end = findMatchingClosingBrace(content, openBrace);
+        if (openBrace < 0 || end < 0) {
+            continue;
+        }
+
+        FunctionDefinitionMatch definitionMatch;
+        definitionMatch.start = start;
+        definitionMatch.openBrace = openBrace;
+        definitionMatch.end = end;
+        definitionMatch.functionName = match.captured(2);
+        definitionMatch.signature = normalizeFunctionSignature(content.mid(start, openBrace - start));
+        matches.append(definitionMatch);
+    }
+
+    return matches;
+}
+
+QList<FunctionDefinitionMatch> findFunctionDefinitionsByName(const QString &content, const QString &className, const QString &functionName)
+{
+    QList<FunctionDefinitionMatch> matches;
+    const QList<FunctionDefinitionMatch> allMatches = findClassFunctionDefinitions(content, className);
+    for (const FunctionDefinitionMatch &match : allMatches) {
+        if (match.functionName == functionName) {
+            matches.append(match);
+        }
+    }
+    return matches;
+}
+
+bool replaceFunctionDefinitionByName(QString &content, const ClassMeta &meta, const FunctionMeta &func)
+{
+    const QList<FunctionDefinitionMatch> matches = findFunctionDefinitionsByName(content, meta.className, func.name);
+    if (matches.size() != 1 || !matches.first().isValid()) {
+        return false;
+    }
+
+    const FunctionDefinitionMatch &match = matches.first();
+    QString body = content.mid(match.openBrace, match.end - match.openBrace + 1);
+    QString replacement = functionDefinitionSignature(meta, func) + "\n" + body;
+    content.replace(match.start, match.end - match.start + 1, replacement);
+    return true;
+}
+
+void removeObsoleteFunctionDefinitions(QString &content, const ClassMeta &meta)
+{
+    QSet<QString> expectedSignatures;
+    for (const FunctionMeta &func : meta.functions) {
+        expectedSignatures.insert(normalizeFunctionSignature(functionDefinitionSignature(meta, func)));
+    }
+
+    const QList<FunctionDefinitionMatch> matches = findClassFunctionDefinitions(content, meta.className);
+    for (int index = matches.size() - 1; index >= 0; --index) {
+        const FunctionDefinitionMatch &match = matches.at(index);
+        if (!match.isValid()) {
+            continue;
+        }
+
+        if (match.functionName == meta.className || match.functionName == ("~" + meta.className)) {
+            continue;
+        }
+
+        if (expectedSignatures.contains(match.signature)) {
+            continue;
+        }
+
+        int removeEnd = match.end + 1;
+        while (removeEnd < content.size() && content.at(removeEnd) == '\n') {
+            ++removeEnd;
+        }
+        content.remove(match.start, removeEnd - match.start);
+    }
+
+    content.replace(QRegularExpression("\\n// --- Generated Stubs ---\\n(?=\\s*$)"), "\n");
+}
 }
 
 GeneratorEngine::GeneratorEngine(QObject *parent) : QObject(parent) {}
 
 QString GeneratorEngine::previewHeader(const ClassMeta &meta)
 {
-    return renderHeader(meta);
+    return normalizeGeneratedText(renderHeader(meta));
 }
 
 QString GeneratorEngine::previewSource(const ClassMeta &meta)
 {
-    return renderSource(meta, QString());
+    return normalizeGeneratedText(renderSource(meta, QString()));
 }
 
 bool GeneratorEngine::generateClass(const ClassMeta &meta, const QString &projectRootPath)
@@ -245,7 +660,7 @@ bool GeneratorEngine::generateClass(const ClassMeta &meta, const QString &projec
 
     // 2. 生成头文件 (.h)
     // 策略：头文件通常由工具完全管理，直接覆盖（或者也可以做简单的标记保护，这里简化为覆盖）
-    QString hContent = renderHeader(meta);
+    QString hContent = normalizeGeneratedText(renderHeader(meta));
     QFile hFile(hFilePath);
     if (!hFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         emit logMessage(QString("Error writing header: %1").arg(hFile.errorString()));
@@ -266,7 +681,7 @@ bool GeneratorEngine::generateClass(const ClassMeta &meta, const QString &projec
         }
     }
     
-    QString cppContent = renderSource(meta, existingCpp);
+    QString cppContent = normalizeGeneratedText(renderSource(meta, existingCpp));
     QFile cppFile(cppFilePath);
     if (!cppFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
         emit logMessage(QString("Error writing source: %1").arg(cppFile.errorString()));
@@ -276,31 +691,52 @@ bool GeneratorEngine::generateClass(const ClassMeta &meta, const QString &projec
     outCpp << cppContent;
     cppFile.close();
 
+    if (!generateLibraryProjectFiles(projectRootPath)) {
+        emit logMessage("Error: Failed to update generated library CMake files.");
+        return false;
+    }
+
     emit logMessage(QString("Success: Generated %1").arg(meta.className));
     return true;
 }
 
 QString GeneratorEngine::loadTemplate(const QString &domainKey, const QString &fileName)
 {
-    // 尝试从项目根目录下的templates文件夹加载模板
-    // 可执行文件在 build/src/ArchBuilder/，项目根目录是 e:/Project/VSCodeProject/ArchitextGen
-    // 模板路径: {projectRoot}/templates/{domainKey}/{fileName}
+    // 优先从项目根目录下的templates文件夹加载模板
+    // 使用 QStandardPaths 查找项目根目录
+    QStringList searchPaths;
     
+    // 1. 尝试从应用程序所在目录的相对路径查找
     QString appDir = QCoreApplication::applicationDirPath();
+    searchPaths << appDir + "/../../../templates/";
+    searchPaths << appDir + "/../../templates/";
+    searchPaths << appDir + "/../templates/";
+    searchPaths << appDir + "/templates/";
     
-    // 尝试多个可能的路径
-    QStringList possiblePaths;
-    possiblePaths << appDir + "/../../../templates/" + domainKey + "/" + fileName;
-    possiblePaths << appDir + "/../../templates/" + domainKey + "/" + fileName;
-    possiblePaths << appDir + "/../templates/" + domainKey + "/" + fileName;
-    possiblePaths << appDir + "/templates/" + domainKey + "/" + fileName;
+    // 2. 尝试从工作目录查找
+    searchPaths << QDir::currentPath() + "/templates/";
     
-    for (const QString &templatePath : possiblePaths) {
+    // 3. 尝试从用户文档目录查找
+    QString userDocPath = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    searchPaths << userDocPath + "/ArchitextGen/templates/";
+    
+    // 4. 尝试从应用程序资源中查找
+    // 如果编译时包含了qrc资源，这可以作为备选
+    
+    for (const QString &basePath : searchPaths) {
+        QString templatePath = basePath + domainKey + "/" + fileName;
         QFile f(templatePath);
         if (f.open(QIODevice::ReadOnly)) {
             qDebug() << "Template loaded from:" << templatePath;
             return f.readAll();
         }
+    }
+    
+    // 如果找不到特定域的模板，尝试使用通用模板
+    QString genericPath = appDir + "/../../../templates/Generic/" + fileName;
+    QFile genericFile(genericPath);
+    if (genericFile.open(QIODevice::ReadOnly)) {
+        return genericFile.readAll();
     }
     
     // 如果找不到特定域的模板，使用默认模板
@@ -349,12 +785,25 @@ QString GeneratorEngine::renderSource(const ClassMeta &meta, const QString &exis
     if (!existingContent.isEmpty()) {
         QString mergedContent = existingContent;
         QStringList missingDefinitions;
+        
+        // 使用更可靠的函数检测：查找函数定义的开头
         for (const auto &func : meta.functions) {
             const QString signature = functionDefinitionSignature(meta, func);
-            if (!mergedContent.contains(signature)) {
+            QRegularExpression regex("(" + QRegularExpression::escape(signature) + ")\\s*[/[{]");
+            if (regex.match(mergedContent).hasMatch()) {
+                continue;
+            }
+
+            if (replaceFunctionDefinitionByName(mergedContent, meta, func)) {
+                continue;
+            }
+
+            {
                 missingDefinitions << buildFunctionDefinition(meta, func);
             }
         }
+
+        removeObsoleteFunctionDefinitions(mergedContent, meta);
 
         if (missingDefinitions.isEmpty()) {
             return mergedContent;
@@ -391,6 +840,8 @@ QString GeneratorEngine::renderSource(const ClassMeta &meta, const QString &exis
 QString GeneratorEngine::replacePlaceholders(QString content, const ClassMeta &meta)
 {
     content.replace("{{CLASS_NAME}}", meta.className);
+    content.replace("{{NAMESPACE}}", meta.namespaceStr);
+    content.replace("{{QUALIFIED_NAME}}", meta.qualifiedName());
     content.replace("{{BASE_CLASS}}", meta.baseClass);
     content.replace("{{DOMAIN_KEY}}", meta.domainKey);
     content.replace("{{BASE_CLASS_INCLUDE}}", buildBaseClassInclude(meta.baseClass));
@@ -424,5 +875,59 @@ QString GeneratorEngine::replacePlaceholders(QString content, const ClassMeta &m
     }
     content.replace("{{MEMBER_DECLARATIONS}}", memberDeclarations);
 
-    return content;
+    return normalizeGeneratedText(content);
+}
+
+bool GeneratorEngine::generateLibraryProjectFiles(const QString &projectRootPath)
+{
+    const QStringList domains = discoverLibraryDomains(projectRootPath);
+    if (domains.isEmpty()) {
+        emit logMessage("Warning: No generated source files found for library scaffolding.");
+        return true;
+    }
+
+    const QDir rootDirectory(projectRootPath);
+    QString errorMessage;
+
+    const QString cmakeDirectoryPath = rootDirectory.filePath("cmake");
+    if (!QDir().mkpath(cmakeDirectoryPath)) {
+        emit logMessage(QString("Error: Cannot create CMake helper directory %1").arg(cmakeDirectoryPath));
+        return false;
+    }
+
+    for (const QString &domain : domains) {
+        const QString domainPath = rootDirectory.filePath(domain);
+        const QStringList headerFiles = listMatchingFiles(domainPath, headerFilePatterns());
+        const QStringList sourceFiles = listMatchingFiles(domainPath, sourceFilePatterns());
+        if (sourceFiles.isEmpty()) {
+            continue;
+        }
+
+        const QString domainCMakePath = QDir(domainPath).filePath("CMakeLists.txt");
+        if (!writeTextFileIfChanged(domainCMakePath, buildDomainCMakeContent(domain, headerFiles, sourceFiles), &errorMessage)) {
+            emit logMessage(QString("Error writing domain CMake file %1: %2").arg(domainCMakePath, errorMessage));
+            return false;
+        }
+    }
+
+    const QString rootCMakePath = rootDirectory.filePath("CMakeLists.txt");
+    if (!writeTextFileIfChanged(rootCMakePath, buildRootCMakeContent(domains), &errorMessage)) {
+        emit logMessage(QString("Error writing root CMake file %1: %2").arg(rootCMakePath, errorMessage));
+        return false;
+    }
+
+    const QString configTemplatePath = QDir(cmakeDirectoryPath).filePath("ArchitectGenLibrariesConfig.cmake.in");
+    if (!writeTextFileIfChanged(configTemplatePath, buildPackageConfigTemplateContent(), &errorMessage)) {
+        emit logMessage(QString("Error writing package config template %1: %2").arg(configTemplatePath, errorMessage));
+        return false;
+    }
+
+    const QString readmePath = rootDirectory.filePath("README.md");
+    if (!writeTextFileIfChanged(readmePath, buildReadmeContent(domains), &errorMessage)) {
+        emit logMessage(QString("Error writing library README %1: %2").arg(readmePath, errorMessage));
+        return false;
+    }
+
+    emit logMessage("Updated reusable library project files.");
+    return true;
 }

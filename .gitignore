@@ -1,2 +1,40 @@
-/.vscode
-/build
+.vscode/
+
+# Build directories
+/build/
+/generated/
+/templates/build/
+**/build/
+
+# CMake cache and generated files
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile
+install_manifest*.txt
+*.cmake.user
+
+# Qt/CMake autogen and API metadata
+*_autogen/
+.cmake/
+
+# Compiler and linker outputs
+*.obj
+*.o
+*.obj.d
+*.a
+*.lib
+*.dll
+*.exe
+*.exp
+*.ilk
+*.pdb
+
+# Runtime and temporary files
+*.log
+*.tmp
+*.user
+
+# Local project data
+/architectgen.project.json
+**/architectgen.project.json

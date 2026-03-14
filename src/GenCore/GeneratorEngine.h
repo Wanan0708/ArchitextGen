@@ -31,6 +31,8 @@ private:
     QString loadTemplate(const QString &domainKey, const QString &fileName);
     // 内部辅助：简单的占位符替换
     QString replacePlaceholders(QString content, const ClassMeta &meta);
+    // 生成可复用库工程的根级和分类级 CMake 文件
+    bool generateLibraryProjectFiles(const QString &projectRootPath);
 };
 
 #endif // GENERATORENGINE_H

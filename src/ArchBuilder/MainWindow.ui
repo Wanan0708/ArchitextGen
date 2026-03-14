@@ -6,305 +6,359 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1200</width>
-    <height>768</height>
+    <width>1400</width>
+    <height>900</height>
    </rect>
   </property>
   <property name="windowTitle">
    <string>ArchitectGen</string>
   </property>
   <widget class="QWidget" name="centralwidget">
-   <layout class="QHBoxLayout" name="horizontalLayout">
+   <layout class="QVBoxLayout" name="centralLayout">
+    <property name="spacing">
+     <number>10</number>
+    </property>
+    <property name="leftMargin">
+     <number>12</number>
+    </property>
+    <property name="topMargin">
+     <number>12</number>
+    </property>
+    <property name="rightMargin">
+     <number>12</number>
+    </property>
+    <property name="bottomMargin">
+     <number>12</number>
+    </property>
     <item>
-     <widget class="QTreeView" name="treeView">
-      <property name="minimumSize">
-       <size>
-        <width>300</width>
-        <height>0</height>
-       </size>
+     <widget class="QSplitter" name="mainSplitter">
+      <property name="orientation">
+       <enum>Qt::Horizontal</enum>
       </property>
-     </widget>
-    </item>
-    <item>
-     <layout class="QVBoxLayout" name="verticalLayout_2">
-      <item>
-             <widget class="QGroupBox" name="projectGroup">
-                <property name="title">
-                 <string>Project Output</string>
-                </property>
-                <layout class="QVBoxLayout" name="verticalLayout_3">
-                 <item>
-                    <widget class="QLabel" name="outputPathLabel">
-                     <property name="text">
-                        <string>Output Directory</string>
-                     </property>
-                    </widget>
-                 </item>
-                 <item>
-                    <widget class="QLineEdit" name="outputPathEdit">
-                     <property name="readOnly">
-                        <bool>true</bool>
-                     </property>
-                    </widget>
-                 </item>
-                 <item>
-                    <layout class="QHBoxLayout" name="horizontalLayout_4">
-                     <item>
-                        <widget class="QPushButton" name="browseProjectBtn">
-                         <property name="text">
-                            <string>Browse...</string>
-                         </property>
-                        </widget>
-                     </item>
-                     <item>
-                        <widget class="QPushButton" name="generateCurrentBtn">
-                         <property name="text">
-                            <string>Generate Current</string>
-                         </property>
-                        </widget>
-                     </item>
-                     <item>
-                        <widget class="QPushButton" name="generateAllBtn">
-                         <property name="text">
-                            <string>Generate All</string>
-                         </property>
-                        </widget>
-                     </item>
-                    </layout>
-                 </item>
-                </layout>
-             </widget>
-            </item>
-            <item>
+      <widget class="QGroupBox" name="navigationGroup">
+       <property name="title">
+        <string>Project Structure</string>
+       </property>
+       <layout class="QVBoxLayout" name="navigationLayout">
+        <item>
+         <widget class="QLabel" name="navigationHintLabel">
+          <property name="text">
+           <string>右键域或类节点可以快速新增类，单击节点会同步刷新中间编辑区和右侧预览。</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QTreeView" name="treeView">
+          <property name="minimumSize">
+           <size>
+            <width>220</width>
+            <height>0</height>
+           </size>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QSplitter" name="contentSplitter">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
        <widget class="QGroupBox" name="classInfoGroup">
         <property name="title">
-         <string>Class Information</string>
+         <string>Class Designer</string>
         </property>
-        <layout class="QVBoxLayout" name="verticalLayout">
+        <layout class="QVBoxLayout" name="classDesignerLayout">
          <item>
-          <widget class="QLabel" name="labelClassName">
-           <property name="text">
-            <string>Class Name:</string>
-           </property>
-          </widget>
+          <layout class="QFormLayout" name="classFormLayout">
+           <item row="0" column="0">
+            <widget class="QLabel" name="labelClassName">
+             <property name="text">
+              <string>Class Name</string>
+             </property>
+            </widget>
+           </item>
+           <item row="0" column="1">
+            <widget class="QLineEdit" name="classNameEdit">
+             <property name="placeholderText">
+              <string>Enter class name</string>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="0">
+            <widget class="QLabel" name="labelBaseClass">
+             <property name="text">
+              <string>Base Class</string>
+             </property>
+            </widget>
+           </item>
+           <item row="1" column="1">
+            <widget class="QLineEdit" name="baseClassEdit">
+             <property name="text">
+              <string>QObject</string>
+             </property>
+             <property name="placeholderText">
+              <string>Enter base class</string>
+             </property>
+            </widget>
+           </item>
+          </layout>
          </item>
          <item>
-          <widget class="QLineEdit" name="classNameEdit">
-           <property name="placeholderText">
-            <string>Enter class name</string>
+          <widget class="QTabWidget" name="editorTabs">
+           <property name="currentIndex">
+            <number>0</number>
            </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QLabel" name="labelBaseClass">
-           <property name="text">
-            <string>Base Class:</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QLineEdit" name="baseClassEdit">
-           <property name="text">
-            <string>QObject</string>
-           </property>
-           <property name="placeholderText">
-            <string>Enter base class</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QLabel" name="labelFunctions">
-           <property name="text">
-            <string>Functions:</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QTableWidget" name="functionsTable">
-           <property name="minimumSize">
-            <size>
-             <width>0</width>
-             <height>150</height>
-            </size>
-           </property>
-           <column>
-            <property name="text">
-             <string>Function Name</string>
-            </property>
-           </column>
-           <column>
-            <property name="text">
-             <string>Return Type</string>
-            </property>
-           </column>
-           <column>
-            <property name="text">
-             <string>Parameters</string>
-            </property>
-           </column>
-           <column>
-            <property name="text">
-             <string>Const</string>
-            </property>
-           </column>
-                <column>
-                  <property name="text">
-                   <string>Static</string>
-                  </property>
-                </column>
-                <column>
-                  <property name="text">
-                   <string>Virtual</string>
-                  </property>
-                </column>
-                 <column>
-                  <property name="text">
-                   <string>Access</string>
-                  </property>
-                 </column>
-          </widget>
-         </item>
+           <widget class="QWidget" name="functionsEditorTab">
+            <attribute name="title">
+             <string>Functions</string>
+            </attribute>
+            <layout class="QVBoxLayout" name="functionsEditorLayout">
              <item>
-               <widget class="QGroupBox" name="functionOptionsGroup">
-                <property name="title">
-                  <string>Selected Function Options</string>
+              <widget class="QTableWidget" name="functionsTable">
+               <property name="minimumSize">
+                <size>
+                 <width>0</width>
+                 <height>220</height>
+                </size>
+               </property>
+               <column>
+                <property name="text">
+                 <string>Function Name</string>
                 </property>
-                <layout class="QHBoxLayout" name="horizontalLayout_6">
+               </column>
+               <column>
+                <property name="text">
+                 <string>Return Type</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Parameters</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Const</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Static</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Virtual</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Access</string>
+                </property>
+               </column>
+              </widget>
+             </item>
+             <item>
+              <layout class="QHBoxLayout" name="functionInspectorLayout">
+               <item>
+                <widget class="QGroupBox" name="functionOptionsGroup">
+                 <property name="title">
+                  <string>Selected Function Options</string>
+                 </property>
+                 <layout class="QVBoxLayout" name="functionOptionsLayout">
                   <item>
                    <widget class="QCheckBox" name="funcConstCheck">
-                     <property name="text">
-                      <string>Const</string>
-                     </property>
+                    <property name="text">
+                     <string>Const</string>
+                    </property>
                    </widget>
                   </item>
                   <item>
                    <widget class="QCheckBox" name="funcStaticCheck">
-                     <property name="text">
-                      <string>Static</string>
-                     </property>
+                    <property name="text">
+                     <string>Static</string>
+                    </property>
                    </widget>
                   </item>
                   <item>
                    <widget class="QCheckBox" name="funcVirtualCheck">
-                     <property name="text">
-                      <string>Virtual</string>
-                     </property>
+                    <property name="text">
+                     <string>Virtual</string>
+                    </property>
                    </widget>
                   </item>
-                           <item>
-                            <widget class="QComboBox" name="funcAccessCombo">
-                              <item>
-                               <property name="text">
-                                 <string>public</string>
-                               </property>
-                              </item>
-                              <item>
-                               <property name="text">
-                                 <string>protected</string>
-                               </property>
-                              </item>
-                              <item>
-                               <property name="text">
-                                 <string>private</string>
-                               </property>
-                              </item>
-                            </widget>
-                           </item>
-                </layout>
-               </widget>
+                  <item>
+                   <widget class="QComboBox" name="funcAccessCombo">
+                    <item>
+                     <property name="text">
+                      <string>public</string>
+                     </property>
+                    </item>
+                    <item>
+                     <property name="text">
+                      <string>protected</string>
+                     </property>
+                    </item>
+                    <item>
+                     <property name="text">
+                      <string>private</string>
+                     </property>
+                    </item>
+                   </widget>
+                  </item>
+                 </layout>
+                </widget>
+               </item>
+               <item>
+                <widget class="QGroupBox" name="parameterGroup">
+                 <property name="title">
+                  <string>Selected Function Parameters</string>
+                 </property>
+                 <layout class="QVBoxLayout" name="verticalLayout_6">
+                  <item>
+                   <widget class="QTableWidget" name="parametersTable">
+                    <property name="minimumSize">
+                     <size>
+                      <width>0</width>
+                      <height>170</height>
+                     </size>
+                    </property>
+                    <column>
+                     <property name="text">
+                      <string>Type</string>
+                     </property>
+                    </column>
+                    <column>
+                     <property name="text">
+                      <string>Name</string>
+                     </property>
+                    </column>
+                    <column>
+                     <property name="text">
+                      <string>Default Value</string>
+                     </property>
+                    </column>
+                    <column>
+                     <property name="text">
+                      <string>Const Ref</string>
+                     </property>
+                    </column>
+                   </widget>
+                  </item>
+                  <item>
+                   <layout class="QHBoxLayout" name="horizontalLayout_5">
+                    <item>
+                     <widget class="QPushButton" name="addParameterBtn">
+                      <property name="text">
+                       <string>Add Parameter</string>
+                      </property>
+                     </widget>
+                    </item>
+                    <item>
+                     <widget class="QPushButton" name="deleteParameterBtn">
+                      <property name="text">
+                       <string>Delete Parameter</string>
+                      </property>
+                     </widget>
+                    </item>
+                   </layout>
+                  </item>
+                 </layout>
+                </widget>
+               </item>
+              </layout>
              </item>
-         <item>
-          <widget class="QGroupBox" name="parameterGroup">
-           <property name="title">
-            <string>Selected Function Parameters</string>
-           </property>
-           <layout class="QVBoxLayout" name="verticalLayout_6">
-            <item>
-             <widget class="QTableWidget" name="parametersTable">
-              <property name="minimumSize">
-               <size>
-                <width>0</width>
-                <height>120</height>
-               </size>
-              </property>
-              <column>
-               <property name="text">
-                <string>Type</string>
+            </layout>
+           </widget>
+           <widget class="QWidget" name="membersEditorTab">
+            <attribute name="title">
+             <string>Members</string>
+            </attribute>
+            <layout class="QVBoxLayout" name="membersEditorLayout">
+             <item>
+              <widget class="QTableWidget" name="membersTable">
+               <property name="minimumSize">
+                <size>
+                 <width>0</width>
+                 <height>220</height>
+                </size>
                </property>
-              </column>
-              <column>
-               <property name="text">
-                <string>Name</string>
-               </property>
-              </column>
-              <column>
-               <property name="text">
-                <string>Default Value</string>
-               </property>
-              </column>
-              <column>
-               <property name="text">
-                <string>Const Ref</string>
-               </property>
-              </column>
-             </widget>
-            </item>
-            <item>
-             <layout class="QHBoxLayout" name="horizontalLayout_5">
-              <item>
-               <widget class="QPushButton" name="addParameterBtn">
+               <column>
                 <property name="text">
-            <string>Add Parameter</string>
+                 <string>Type</string>
                 </property>
-               </widget>
-              </item>
-              <item>
-               <widget class="QPushButton" name="deleteParameterBtn">
+               </column>
+               <column>
                 <property name="text">
-            <string>Delete Parameter</string>
+                 <string>Name</string>
                 </property>
-               </widget>
-              </item>
-             </layout>
-            </item>
-           </layout>
-          </widget>
-         </item>
-         <item>
-          <widget class="QLabel" name="labelMembers">
-           <property name="text">
-            <string>Member Variables:</string>
-           </property>
-          </widget>
-         </item>
-         <item>
-          <widget class="QTableWidget" name="membersTable">
-           <property name="minimumSize">
-            <size>
-             <width>0</width>
-             <height>100</height>
-            </size>
-           </property>
-           <column>
-            <property name="text">
-             <string>Type</string>
-            </property>
-           </column>
-           <column>
-            <property name="text">
-             <string>Name</string>
-            </property>
-           </column>
-           <column>
-            <property name="text">
-             <string>Default Value</string>
-            </property>
-           </column>
-           <column>
-            <property name="text">
-             <string>Access</string>
-            </property>
-           </column>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Default Value</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Access</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Static</string>
+                </property>
+               </column>
+               <column>
+                <property name="text">
+                 <string>Constexpr</string>
+                </property>
+               </column>
+              </widget>
+             </item>
+             <item>
+              <widget class="QGroupBox" name="memberOptionsGroup">
+               <property name="title">
+                <string>Selected Member Options</string>
+               </property>
+               <layout class="QHBoxLayout" name="horizontalLayout_7">
+                <item>
+                 <widget class="QComboBox" name="memberAccessCombo">
+                  <item>
+                   <property name="text">
+                    <string>public</string>
+                   </property>
+                  </item>
+                  <item>
+                   <property name="text">
+                    <string>protected</string>
+                   </property>
+                  </item>
+                  <item>
+                   <property name="text">
+                    <string>private</string>
+                   </property>
+                  </item>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QCheckBox" name="memberStaticCheck">
+                  <property name="text">
+                   <string>Static</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QCheckBox" name="memberConstexprCheck">
+                  <property name="text">
+                   <string>Constexpr</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </widget>
+             </item>
+            </layout>
+           </widget>
           </widget>
          </item>
          <item>
@@ -344,50 +398,69 @@
          </item>
         </layout>
        </widget>
-      </item>
-      <item>
-         <widget class="QTabWidget" name="previewTabs">
-          <property name="currentIndex">
-           <number>0</number>
-          </property>
-          <widget class="QWidget" name="headerPreviewTab">
-           <attribute name="title">
-            <string>Header Preview</string>
-           </attribute>
-           <layout class="QVBoxLayout" name="verticalLayout_4">
-            <item>
-             <widget class="QPlainTextEdit" name="headerPreviewEdit">
-              <property name="readOnly">
-               <bool>true</bool>
-              </property>
-             </widget>
-            </item>
-           </layout>
-          </widget>
-          <widget class="QWidget" name="sourcePreviewTab">
-           <attribute name="title">
-            <string>Source Preview</string>
-           </attribute>
-           <layout class="QVBoxLayout" name="verticalLayout_5">
-            <item>
-             <widget class="QPlainTextEdit" name="sourcePreviewEdit">
-              <property name="readOnly">
-               <bool>true</bool>
-              </property>
-             </widget>
-            </item>
-           </layout>
-          </widget>
-         </widget>
-            </item>
-            <item>
-       <widget class="QTextEdit" name="logEdit">
-        <property name="readOnly">
-         <bool>true</bool>
+       <widget class="QSplitter" name="inspectorSplitter">
+        <property name="orientation">
+         <enum>Qt::Vertical</enum>
         </property>
+        <widget class="QGroupBox" name="previewGroup">
+         <property name="title">
+          <string>Live Preview</string>
+         </property>
+         <layout class="QVBoxLayout" name="previewGroupLayout">
+          <item>
+           <widget class="QTabWidget" name="previewTabs">
+            <property name="currentIndex">
+             <number>0</number>
+            </property>
+            <widget class="QWidget" name="headerPreviewTab">
+             <attribute name="title">
+              <string>Header Preview</string>
+             </attribute>
+             <layout class="QVBoxLayout" name="verticalLayout_4">
+              <item>
+               <widget class="QPlainTextEdit" name="headerPreviewEdit">
+                <property name="readOnly">
+                 <bool>true</bool>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </widget>
+            <widget class="QWidget" name="sourcePreviewTab">
+             <attribute name="title">
+              <string>Source Preview</string>
+             </attribute>
+             <layout class="QVBoxLayout" name="verticalLayout_5">
+              <item>
+               <widget class="QPlainTextEdit" name="sourcePreviewEdit">
+                <property name="readOnly">
+                 <bool>true</bool>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </widget>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+        <widget class="QGroupBox" name="activityGroup">
+         <property name="title">
+          <string>Activity Log</string>
+         </property>
+         <layout class="QVBoxLayout" name="activityLayout">
+          <item>
+           <widget class="QTextEdit" name="logEdit">
+            <property name="readOnly">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
        </widget>
-      </item>
-     </layout>
+      </widget>
+     </widget>
     </item>
    </layout>
   </widget>
@@ -404,8 +477,6 @@
     <property name="title">
      <string>File</string>
     </property>
-    <addaction name="actionOpen_Project"/>
-    <addaction name="separator"/>
     <addaction name="actionExit"/>
    </widget>
    <widget class="QMenu" name="menuEdit">
@@ -421,8 +492,10 @@
     <property name="title">
      <string>Build</string>
     </property>
+    <addaction name="actionOpen_Project"/>
+    <addaction name="separator"/>
     <addaction name="actionGenerate_Code"/>
-        <addaction name="actionGenerate_All"/>
+    <addaction name="actionGenerate_All"/>
    </widget>
    <widget class="QMenu" name="menuHelp">
     <property name="title">
@@ -455,7 +528,7 @@
   </action>
   <action name="actionGenerate_Code">
    <property name="text">
-    <string>Generate Code</string>
+    <string>Generate Current</string>
    </property>
   </action>
     <action name="actionGenerate_All">
@@ -465,7 +538,7 @@
     </action>
   <action name="actionOpen_Project">
    <property name="text">
-    <string>Open Project</string>
+    <string>Select Output Directory...</string>
    </property>
   </action>
   <action name="actionExit">

@@ -30,19 +30,30 @@ struct MemberMeta {
     QString name;       // 例如: m_count, m_name
     QString defaultValue; // 例如: 0, "", nullptr
     QString access = "private";
+    bool isStatic = false;
+    bool isConstexpr = false;
 };
 
 // 类元数据
 struct ClassMeta {
     QString className;
-    QString domainKey;  // 对应文件夹名，如 "Core_Business"
-    QString baseClass;  // 继承自谁，如 "QObject", "QWidget"
+    QString namespaceStr;  // 命名空间，如 "MyApp::Core"
+    QString domainKey;      // 对应文件夹名，如 "Core_Business"
+    QString baseClass;      // 继承自谁，如 "QObject", "QWidget"
     QList<FunctionMeta> functions;
     QList<MemberMeta> members;  // 成员变量列表
     
     // 辅助函数：获取生成的头文件名
     QString headerFileName() const { return className + ".h"; }
     QString sourceFileName() const { return className + ".cpp"; }
+    
+    // 获取完整限定名（包含命名空间）
+    QString qualifiedName() const {
+        if (namespaceStr.isEmpty()) {
+            return className;
+        }
+        return namespaceStr + "::" + className;
+    }
 };
 
 // 注册类型以便在 Qt 信号槽或 QVariant 中使用（如果需要）

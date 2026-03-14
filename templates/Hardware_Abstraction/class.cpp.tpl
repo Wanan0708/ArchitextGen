@@ -8,43 +8,16 @@
 
 {{CLASS_NAME}}::{{CLASS_NAME}}({{PARENT_TYPE}}parent)
     : {{BASE_CLASS}}(parent)
-    , m_initialized(false)
-    , m_hardwareConnected(false)
 {
     qDebug() << "{{CLASS_NAME}}::{{CLASS_NAME}}() constructed";
 }
 
 {{CLASS_NAME}}::~{{CLASS_NAME}}()
 {
-    if (m_initialized) {
-        shutdown();
-    }
     qDebug() << "{{CLASS_NAME}}::~{{CLASS_NAME}}() destroyed";
 }
 
-bool {{CLASS_NAME}}::initialize()
-{
-    // TODO: Initialize hardware registers
-    // Example: configure GPIO, setup DMA, etc.
-    
-    m_initialized = true;
-    m_hardwareConnected = true;
-    
-    qDebug() << "{{CLASS_NAME}} hardware initialized";
-    return true;
-}
-
-void {{CLASS_NAME}}::shutdown()
-{
-    // TODO: Clean up hardware resources
-    m_initialized = false;
-    m_hardwareConnected = false;
-    
-    qDebug() << "{{CLASS_NAME}} hardware shutdown";
-}
-
-// --- User Implementations ---
+// --- Generated Implementations ---
 {{FUNCTION_IMPLEMENTATIONS}}
 
-// Implement hardware control logic here
-// Example: readSensor(), writeRegister(), handleInterrupt(), etc.
+// Add hardware-specific implementation here.

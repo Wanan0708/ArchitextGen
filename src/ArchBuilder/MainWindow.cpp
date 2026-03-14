@@ -4,6 +4,7 @@
 #include <QFileDialog>
 #include <QMessageBox>
 #include <QInputDialog>
+#include <QRegularExpression>
 #include <QDir>
 #include <QFile>
 #include <QTextStream>
@@ -11,15 +12,45 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QAction>
+#include <QComboBox>
 #include <QCoreApplication>
 #include <QDebug>
+#include <QFontDatabase>
+#include <QGuiApplication>
+#include <QHeaderView>
+#include <QLabel>
+#include <QLineEdit>
+#include <QScreen>
 #include <QSet>
 #include <QSignalBlocker>
+#include <QSplitter>
 #include <QStatusBar>
+#include <QStyledItemDelegate>
+#include <QStyle>
+#include <QTabWidget>
+#include <QTableWidget>
 #include <QTableWidgetItem>
 
 namespace {
 const char kProjectMetadataFileName[] = "architectgen.project.json";
+
+const QStringList kCommonTypes = {
+    "void",
+    "bool",
+    "int",
+    "float",
+    "double",
+    "QString",
+    "QByteArray",
+    "QVariant",
+    "QList<QString>",
+    "QObject*",
+    "QWidget*"
+};
+
+const QStringList kAccessLevels = {"public", "protected", "private"};
+const QStringList kYesNoOptions = {"No", "Yes"};
+const QRegularExpression kIdentifierPattern(QStringLiteral("^[A-Za-z_][A-Za-z0-9_]*$"));
 
 constexpr int RoleName = Qt::UserRole + 1;
 constexpr int RoleType = Qt::UserRole + 2;
@@ -28,6 +59,57 @@ constexpr int RoleFunctions = Qt::UserRole + 4;
 constexpr int RoleBaseClass = Qt::UserRole + 5;
 constexpr int RoleMembers = Qt::UserRole + 6;
 constexpr int RoleFunctionParameters = Qt::UserRole + 20;
+
+class ComboBoxItemDelegate final : public QStyledItemDelegate
+{
+public:
+    ComboBoxItemDelegate(QStringList options, bool editable, QObject *parent = nullptr)
+        : QStyledItemDelegate(parent)
+        , m_options(std::move(options))
+        , m_editable(editable)
+    {
+    }
+
+    QWidget *createEditor(QWidget *parent, const QStyleOptionViewItem &, const QModelIndex &) const override
+    {
+        auto *combo = new QComboBox(parent);
+        combo->setEditable(m_editable);
+        combo->addItems(m_options);
+        combo->setInsertPolicy(QComboBox::NoInsert);
+        combo->setFrame(false);
+        return combo;
+    }
+
+    void setEditorData(QWidget *editor, const QModelIndex &index) const override
+    {
+        auto *combo = qobject_cast<QComboBox *>(editor);
+        if (!combo) {
+            return;
+        }
+
+        const QString value = index.data(Qt::EditRole).toString();
+        const int optionIndex = combo->findText(value);
+        if (optionIndex >= 0) {
+            combo->setCurrentIndex(optionIndex);
+        } else {
+            combo->setCurrentText(value);
+        }
+    }
+
+    void setModelData(QWidget *editor, QAbstractItemModel *model, const QModelIndex &index) const override
+    {
+        auto *combo = qobject_cast<QComboBox *>(editor);
+        if (!combo) {
+            return;
+        }
+
+        model->setData(index, combo->currentText(), Qt::EditRole);
+    }
+
+private:
+    QStringList m_options;
+    bool m_editable;
+};
 
 bool yesNoToBool(const QString &value)
 {
@@ -202,6 +284,8 @@ MemberMeta memberMetaFromObject(const QJsonObject &object)
     meta.name = object.value("name").toString();
     meta.defaultValue = object.value("defaultValue").toString();
     meta.access = normalizeAccessSpecifier(object.value("access").toString(), "private");
+    meta.isStatic = object.value("isStatic").toBool();
+    meta.isConstexpr = object.value("isConstexpr").toBool();
     return meta;
 }
 
@@ -235,6 +319,8 @@ QJsonObject memberObjectFromMeta(const MemberMeta &meta)
     object["name"] = meta.name;
     object["defaultValue"] = meta.defaultValue;
     object["access"] = normalizeAccessSpecifier(meta.access, "private");
+    object["isStatic"] = meta.isStatic;
+    object["isConstexpr"] = meta.isConstexpr;
     return object;
 }
 
@@ -374,6 +460,211 @@ ClassMeta classMetaFromJsonObject(const QJsonObject &object)
     return meta;
 }
 
+int findMatchingScopeBrace(const QString &content, int openBraceIndex)
+{
+    if (openBraceIndex < 0 || openBraceIndex >= content.size() || content.at(openBraceIndex) != '{') {
+        return -1;
+    }
+
+    int depth = 0;
+    for (int index = openBraceIndex; index < content.size(); ++index) {
+        const QChar ch = content.at(index);
+        if (ch == '{') {
+            ++depth;
+        } else if (ch == '}') {
+            --depth;
+            if (depth == 0) {
+                return index;
+            }
+        }
+    }
+
+    return -1;
+}
+
+bool isManagedGeneratedClassFileSet(const QString &headerContent, const QString &sourceContent, const QString &domainKey)
+{
+    return headerContent.contains(QString("@domain %1").arg(domainKey))
+        && (sourceContent.contains("// --- Generated Implementations ---")
+            || sourceContent.contains("// --- Generated Stubs ---"));
+}
+
+bool parseManagedFunctionDeclaration(const QString &declarationText,
+                                    const QString &className,
+                                    const QString &access,
+                                    FunctionMeta *function)
+{
+    if (!function) {
+        return false;
+    }
+
+    QString declaration = declarationText.trimmed();
+    if (!declaration.endsWith(';')) {
+        return false;
+    }
+    declaration.chop(1);
+
+    bool isStatic = false;
+    bool isVirtual = false;
+    if (declaration.startsWith("static ")) {
+        isStatic = true;
+        declaration.remove(0, QString("static ").size());
+    }
+    if (declaration.startsWith("virtual ")) {
+        isVirtual = true;
+        declaration.remove(0, QString("virtual ").size());
+    }
+
+    bool isConst = false;
+    if (declaration.endsWith(" const")) {
+        isConst = true;
+        declaration.chop(QString(" const").size());
+        declaration = declaration.trimmed();
+    }
+
+    const int openParen = declaration.indexOf('(');
+    const int closeParen = declaration.lastIndexOf(')');
+    if (openParen <= 0 || closeParen <= openParen) {
+        return false;
+    }
+
+    const QString beforeParams = declaration.left(openParen).trimmed();
+    const QString parameterText = declaration.mid(openParen + 1, closeParen - openParen - 1).trimmed();
+    const int separator = beforeParams.lastIndexOf(' ');
+    if (separator <= 0) {
+        return false;
+    }
+
+    const QString returnType = beforeParams.left(separator).trimmed();
+    const QString functionName = beforeParams.mid(separator + 1).trimmed();
+    if (functionName.isEmpty() || functionName == className || functionName == ("~" + className)) {
+        return false;
+    }
+
+    function->name = functionName;
+    function->returnType = returnType;
+    function->parameters = parameterMetaListFromString(parameterText);
+    function->access = access;
+    function->isConst = isConst;
+    function->isStatic = isStatic;
+    function->isVirtual = isVirtual;
+    return true;
+}
+
+bool parseManagedMemberDeclaration(const QString &declarationText,
+                                  const QString &access,
+                                  MemberMeta *member)
+{
+    if (!member) {
+        return false;
+    }
+
+    QString declaration = declarationText.trimmed();
+    if (!declaration.endsWith(';')) {
+        return false;
+    }
+    declaration.chop(1);
+
+    bool isConstexpr = false;
+    bool isStatic = false;
+    if (declaration.startsWith("static constexpr ")) {
+        isConstexpr = true;
+        isStatic = true;
+        declaration.remove(0, QString("static constexpr ").size());
+    } else if (declaration.startsWith("static ")) {
+        isStatic = true;
+        declaration.remove(0, QString("static ").size());
+    }
+
+    QString defaultValue;
+    const int equalIndex = declaration.indexOf('=');
+    if (equalIndex >= 0) {
+        defaultValue = declaration.mid(equalIndex + 1).trimmed();
+        declaration = declaration.left(equalIndex).trimmed();
+    }
+
+    const int separator = declaration.lastIndexOf(' ');
+    if (separator <= 0) {
+        return false;
+    }
+
+    QString type = declaration.left(separator).trimmed();
+    QString name = declaration.mid(separator + 1).trimmed();
+    while (!name.isEmpty() && (name.startsWith('*') || name.startsWith('&'))) {
+        type += name.left(1);
+        name.remove(0, 1);
+    }
+    if (type.isEmpty() || name.isEmpty()) {
+        return false;
+    }
+
+    member->type = type;
+    member->name = name;
+    member->defaultValue = defaultValue;
+    member->access = access;
+    member->isStatic = isStatic;
+    member->isConstexpr = isConstexpr;
+    return true;
+}
+
+ClassMeta parseManagedClassMetaFromFiles(const QString &headerContent, const QString &domainKey)
+{
+    ClassMeta meta;
+
+    QRegularExpression classRegex("class\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?:final\\s*)?:\\s*public\\s+([A-Za-z_][A-Za-z0-9_:<>*&]*)");
+    const QRegularExpressionMatch classMatch = classRegex.match(headerContent);
+    if (!classMatch.hasMatch()) {
+        return meta;
+    }
+
+    meta.className = classMatch.captured(1).trimmed();
+    meta.baseClass = classMatch.captured(2).trimmed();
+    meta.domainKey = domainKey;
+    if (meta.baseClass.isEmpty()) {
+        meta.baseClass = "QObject";
+    }
+
+    const int bodyStart = headerContent.indexOf('{', classMatch.capturedEnd(0));
+    const int bodyEnd = findMatchingScopeBrace(headerContent, bodyStart);
+    if (bodyStart < 0 || bodyEnd <= bodyStart) {
+        return meta;
+    }
+
+    const QString body = headerContent.mid(bodyStart + 1, bodyEnd - bodyStart - 1);
+    QString currentAccess = "private";
+    const QStringList lines = body.split('\n');
+    for (QString line : lines) {
+        line = line.trimmed();
+        if (line.isEmpty() || line == "Q_OBJECT" || line.startsWith("//") || line.startsWith("/*") || line.startsWith('*')) {
+            continue;
+        }
+
+        if (line == "public:" || line == "protected:" || line == "private:") {
+            currentAccess = line.left(line.size() - 1);
+            continue;
+        }
+
+        if (!line.endsWith(';')) {
+            continue;
+        }
+
+        if (line.contains('(') && line.contains(')')) {
+            FunctionMeta function;
+            if (parseManagedFunctionDeclaration(line, meta.className, currentAccess, &function)) {
+                meta.functions.append(function);
+            }
+            continue;
+        }
+
+        MemberMeta member;
+        if (parseManagedMemberDeclaration(line, currentAccess, &member)) {
+            meta.members.append(member);
+        }
+    }
+
+    return meta;
+}
+
 QStandardItem *findDomainItem(QStandardItemModel *model, const QString &domainKey)
 {
     for (int row = 0; row < model->rowCount(); ++row) {
@@ -385,15 +676,159 @@ QStandardItem *findDomainItem(QStandardItemModel *model, const QString &domainKe
 
     return nullptr;
 }
+
+QTableWidgetItem *createEditableItem(const QString &text)
+{
+    auto *item = new QTableWidgetItem(text);
+    item->setFlags(item->flags() | Qt::ItemIsEditable);
+    return item;
+}
+
+QTableWidgetItem *createReadOnlyItem(const QString &text)
+{
+    auto *item = new QTableWidgetItem(text);
+    item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+    return item;
+}
+
+void setItemValidationState(QTableWidgetItem *item, bool valid, const QString &message = QString())
+{
+    if (!item) {
+        return;
+    }
+
+    if (valid) {
+        item->setBackground(Qt::transparent);
+        item->setForeground(QBrush());
+        item->setToolTip(QString());
+        return;
+    }
+
+    item->setBackground(QColor("#fde8e8"));
+    item->setForeground(QBrush(QColor("#8f2d2d")));
+    item->setToolTip(message);
+}
+
+void setLineEditValidationState(QLineEdit *lineEdit, bool valid, const QString &message = QString())
+{
+    if (!lineEdit) {
+        return;
+    }
+
+    lineEdit->setProperty("invalid", !valid);
+    lineEdit->setToolTip(valid ? QString() : message);
+    lineEdit->style()->unpolish(lineEdit);
+    lineEdit->style()->polish(lineEdit);
+    lineEdit->update();
+}
+
+bool isValidCppIdentifier(const QString &value)
+{
+    const QString trimmed = value.trimmed();
+    if (trimmed.isEmpty()) {
+        return false;
+    }
+
+    if (trimmed.startsWith('~')) {
+        return kIdentifierPattern.match(trimmed.mid(1)).hasMatch();
+    }
+
+    return kIdentifierPattern.match(trimmed).hasMatch();
+}
+
+bool isLikelyValidCppType(const QString &value, bool allowVoid)
+{
+    const QString trimmed = value.trimmed();
+    if (trimmed.isEmpty()) {
+        return false;
+    }
+
+    if (!allowVoid && trimmed == "void") {
+        return false;
+    }
+
+    int angleDepth = 0;
+    for (const QChar ch : trimmed) {
+        if (ch == '<') {
+            ++angleDepth;
+            continue;
+        }
+        if (ch == '>') {
+            --angleDepth;
+            if (angleDepth < 0) {
+                return false;
+            }
+            continue;
+        }
+
+        if (ch.isLetterOrNumber() || ch == '_' || ch == ':' || ch == '*' || ch == '&' || ch == ',' || ch == ' ' || ch == '(' || ch == ')') {
+            continue;
+        }
+
+        return false;
+    }
+
+    if (angleDepth != 0) {
+        return false;
+    }
+
+    const QString normalized = trimmed;
+    return normalized.contains(QRegularExpression(QStringLiteral("[A-Za-z_]")));
+}
+
+QString defaultValueForType(QString type)
+{
+    type = type.trimmed();
+    type.remove("const ");
+    type.remove('&');
+    type = type.trimmed();
+
+    if (type.endsWith('*')) {
+        return "nullptr";
+    }
+
+    const QString normalized = type.toLower();
+    if (normalized == "bool") {
+        return "false";
+    }
+    if (normalized == "float" || normalized == "double") {
+        return "0.0";
+    }
+    if (normalized == "int" || normalized == "short" || normalized == "long" || normalized == "long long"
+        || normalized == "unsigned" || normalized == "unsigned int" || normalized == "unsigned short"
+        || normalized == "unsigned long" || normalized == "unsigned long long" || normalized == "size_t") {
+        return "0";
+    }
+    if (type == "QString") {
+        return "QString()";
+    }
+    if (type == "QByteArray") {
+        return "QByteArray()";
+    }
+    if (type == "QVariant") {
+        return "QVariant()";
+    }
+    if (type.startsWith("QList<") || type.startsWith("QVector<") || type.startsWith("std::vector<")) {
+        return "{}";
+    }
+
+    return "{}";
+}
 }
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
+    , m_model(nullptr)
     , m_engine(new GeneratorEngine(this))
+    , m_contextMenu(nullptr)
     , m_currentClassItem(nullptr)
+    , m_autoSaveTimer(nullptr)
 {
     ui->setupUi(this);
+    configureAdaptiveWindow();
+    configureWorkspaceLayout();
+    configureVisualStyle();
 
     // 初始化 Model
     m_model = new QStandardItemModel(this);
@@ -410,6 +845,16 @@ MainWindow::MainWindow(QWidget *parent)
     connect(addClassAction, &QAction::triggered, this, &MainWindow::onAddNewClassFromContextMenu);
     m_contextMenu->addAction(addClassAction);
 
+    // 初始化自动保存定时器（5分钟自动保存一次）
+    m_autoSaveTimer = new QTimer(this);
+    m_autoSaveTimer->setInterval(5 * 60 * 1000); // 5分钟
+    connect(m_autoSaveTimer, &QTimer::timeout, this, [this]() {
+        if (persistProjectModel()) {
+            statusBar()->showMessage("Auto-saved", 2000);
+        }
+    });
+    m_autoSaveTimer->start();
+    
     // 连接信号
     connect(ui->treeView->selectionModel(), &QItemSelectionModel::selectionChanged,
             this, &MainWindow::onTreeSelectionChanged);
@@ -423,9 +868,6 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->actionOpen_Project, &QAction::triggered, this, &MainWindow::onActionOpenProject);
     connect(ui->actionExit, &QAction::triggered, this, &QApplication::quit);
     connect(ui->actionAbout, &QAction::triggered, this, &MainWindow::onActionAbout);
-    connect(ui->browseProjectBtn, &QPushButton::clicked, this, &MainWindow::onActionOpenProject);
-    connect(ui->generateCurrentBtn, &QPushButton::clicked, this, &MainWindow::onActionGenerate);
-    connect(ui->generateAllBtn, &QPushButton::clicked, this, &MainWindow::onActionGenerateAll);
     
     // 连接属性面板按钮
     connect(ui->addFunctionBtn, &QPushButton::clicked, this, &MainWindow::onAddFunctionClicked);
@@ -439,8 +881,19 @@ MainWindow::MainWindow(QWidget *parent)
     connect(ui->funcStaticCheck, &QCheckBox::toggled, this, &MainWindow::onFunctionFlagsChanged);
     connect(ui->funcVirtualCheck, &QCheckBox::toggled, this, &MainWindow::onFunctionFlagsChanged);
     connect(ui->funcAccessCombo, &QComboBox::currentTextChanged, this, &MainWindow::onFunctionFlagsChanged);
-    connect(ui->classNameEdit, &QLineEdit::textChanged, this, [this] { refreshPreview(); });
-    connect(ui->baseClassEdit, &QLineEdit::textChanged, this, [this] { refreshPreview(); });
+    connect(ui->membersTable, &QTableWidget::itemSelectionChanged, this, &MainWindow::onMemberSelectionChanged);
+    connect(ui->memberAccessCombo, &QComboBox::currentTextChanged, this, &MainWindow::onMemberFlagsChanged);
+    connect(ui->memberStaticCheck, &QCheckBox::toggled, this, &MainWindow::onMemberFlagsChanged);
+    connect(ui->memberConstexprCheck, &QCheckBox::toggled, this, &MainWindow::onMemberFlagsChanged);
+    connect(ui->editorTabs, &QTabWidget::currentChanged, this, &MainWindow::onEditorTabChanged);
+    connect(ui->classNameEdit, &QLineEdit::textChanged, this, [this] {
+        refreshPreview();
+        updateValidationFeedback();
+    });
+    connect(ui->baseClassEdit, &QLineEdit::textChanged, this, [this] {
+        refreshPreview();
+        updateValidationFeedback();
+    });
     connect(ui->functionsTable, &QTableWidget::itemChanged, this, [this](QTableWidgetItem *item) {
         if (!item) {
             return;
@@ -462,16 +915,24 @@ MainWindow::MainWindow(QWidget *parent)
             loadFunctionOptionsFromSelectedFunction();
         }
         refreshPreview();
+        updateValidationFeedback();
         persistProjectModel();
     });
     connect(ui->membersTable, &QTableWidget::itemChanged, this, [this] {
+        if (ui->membersTable->currentRow() >= 0) {
+            loadMemberOptionsFromSelectedMember();
+        }
         refreshPreview();
+        updateValidationFeedback();
         persistProjectModel();
     });
-    connect(ui->parametersTable, &QTableWidget::itemChanged, this, [this] { syncSelectedFunctionParameters(); });
+    connect(ui->parametersTable, &QTableWidget::itemChanged, this, [this] {
+        syncSelectedFunctionParameters();
+        updateValidationFeedback();
+    });
 
     m_templateRootPath = QDir(QCoreApplication::applicationDirPath() + "/../../../templates").absolutePath();
-    m_projectRootPath = QDir(QCoreApplication::applicationDirPath() + "/../../../generated").absolutePath();
+    m_projectRootPath = QDir(QCoreApplication::applicationDirPath() + "/../../../templates").absolutePath();
 
     QDir().mkpath(m_projectRootPath);
     updateOutputPathDisplay();
@@ -480,40 +941,639 @@ MainWindow::MainWindow(QWidget *parent)
     ui->logEdit->append(QString("Output path: %1").arg(QDir::toNativeSeparators(m_projectRootPath)));
 
     initializeDefaultDomains();
-    loadProjectModel(m_projectRootPath);
+    if (!loadProjectModel(m_projectRootPath)) {
+        const bool imported = reconcileModelWithFilesystem();
+        refreshTreePresentation();
+        ui->treeView->expandAll();
+        if (imported) {
+            persistProjectModel();
+            ui->logEdit->append("No metadata found. Imported managed classes from disk.");
+        }
+    }
 
     // 连接引擎日志到 UI
     connect(m_engine, &GeneratorEngine::logMessage, this, [this](const QString &msg){
         ui->logEdit->append(msg);
         qDebug() << "[GenCore]" << msg;
     });
-    
-    // 初始化函数表格
-    ui->functionsTable->setColumnWidth(0, 150);
-    ui->functionsTable->setColumnWidth(1, 100);
-    ui->functionsTable->setColumnWidth(2, 200);
-    ui->functionsTable->setColumnWidth(3, 60);
-    ui->functionsTable->setColumnWidth(4, 60);
-    ui->functionsTable->setColumnWidth(5, 60);
-    ui->functionsTable->setColumnWidth(6, 90);
-    
-    // 初始化成员变量表格
-    ui->membersTable->setColumnWidth(0, 150);
-    ui->membersTable->setColumnWidth(1, 150);
-    ui->membersTable->setColumnWidth(2, 100);
-    ui->membersTable->setColumnWidth(3, 90);
 
-    ui->parametersTable->setColumnWidth(0, 150);
-    ui->parametersTable->setColumnWidth(1, 140);
-    ui->parametersTable->setColumnWidth(2, 140);
-    ui->parametersTable->setColumnWidth(3, 80);
+    configureTables();
 
     refreshPreview();
+    updateValidationFeedback();
 }
 
 MainWindow::~MainWindow()
 {
     delete ui;
+}
+
+void MainWindow::configureAdaptiveWindow()
+{
+    setMinimumSize(1180, 760);
+
+    QScreen *screen = QGuiApplication::primaryScreen();
+    if (!screen) {
+        resize(1360, 880);
+        return;
+    }
+
+    const QRect available = screen->availableGeometry();
+    const int width = qBound(minimumWidth(), static_cast<int>(available.width() * 0.84), available.width());
+    const int height = qBound(minimumHeight(), static_cast<int>(available.height() * 0.88), available.height());
+
+    resize(width, height);
+    move(available.center() - rect().center());
+}
+
+void MainWindow::configureWorkspaceLayout()
+{
+    ui->treeView->setMinimumWidth(240);
+    ui->treeView->setMaximumWidth(360);
+    ui->treeView->setHeaderHidden(true);
+    ui->treeView->setUniformRowHeights(true);
+    ui->treeView->setIndentation(18);
+    ui->treeView->setAnimated(true);
+
+    if (QSplitter *mainSplitter = findChild<QSplitter *>("mainSplitter")) {
+        mainSplitter->setChildrenCollapsible(false);
+        mainSplitter->setStretchFactor(0, 0);
+        mainSplitter->setStretchFactor(1, 1);
+        mainSplitter->setSizes({280, 1120});
+    }
+
+    if (QSplitter *contentSplitter = findChild<QSplitter *>("contentSplitter")) {
+        contentSplitter->setChildrenCollapsible(false);
+        contentSplitter->setStretchFactor(0, 3);
+        contentSplitter->setStretchFactor(1, 2);
+        contentSplitter->setSizes({760, 520});
+    }
+
+    if (QSplitter *inspectorSplitter = findChild<QSplitter *>("inspectorSplitter")) {
+        inspectorSplitter->setChildrenCollapsible(false);
+        inspectorSplitter->setStretchFactor(0, 3);
+        inspectorSplitter->setStretchFactor(1, 1);
+        inspectorSplitter->setSizes({520, 220});
+    }
+
+    if (QLineEdit *outputPathEdit = findChild<QLineEdit *>("outputPathEdit")) {
+        outputPathEdit->setCursorPosition(0);
+        outputPathEdit->setMinimumWidth(360);
+    }
+
+    if (QLabel *navigationHintLabel = findChild<QLabel *>("navigationHintLabel")) {
+        navigationHintLabel->setWordWrap(true);
+    }
+
+    updateEditorActionButtons();
+}
+
+void MainWindow::configureTables()
+{
+    const QList<QTableWidget *> tables = {ui->functionsTable, ui->membersTable, ui->parametersTable};
+    for (QTableWidget *table : tables) {
+        table->setAlternatingRowColors(true);
+        table->setSelectionBehavior(QAbstractItemView::SelectRows);
+        table->setSelectionMode(QAbstractItemView::SingleSelection);
+        table->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::EditKeyPressed | QAbstractItemView::SelectedClicked);
+        table->verticalHeader()->setVisible(false);
+        table->horizontalHeader()->setStretchLastSection(false);
+    }
+
+    ui->functionsTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    ui->functionsTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    ui->functionsTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    ui->functionsTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    ui->functionsTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    ui->functionsTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    ui->functionsTable->horizontalHeader()->setSectionResizeMode(6, QHeaderView::ResizeToContents);
+    ui->functionsTable->setItemDelegateForColumn(1, new ComboBoxItemDelegate(kCommonTypes, false, ui->functionsTable));
+    ui->functionsTable->setItemDelegateForColumn(3, new ComboBoxItemDelegate(kYesNoOptions, false, ui->functionsTable));
+    ui->functionsTable->setItemDelegateForColumn(4, new ComboBoxItemDelegate(kYesNoOptions, false, ui->functionsTable));
+    ui->functionsTable->setItemDelegateForColumn(5, new ComboBoxItemDelegate(kYesNoOptions, false, ui->functionsTable));
+    ui->functionsTable->setItemDelegateForColumn(6, new ComboBoxItemDelegate(kAccessLevels, false, ui->functionsTable));
+
+    ui->membersTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    ui->membersTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    ui->membersTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    ui->membersTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    ui->membersTable->horizontalHeader()->setSectionResizeMode(4, QHeaderView::ResizeToContents);
+    ui->membersTable->horizontalHeader()->setSectionResizeMode(5, QHeaderView::ResizeToContents);
+    ui->membersTable->setItemDelegateForColumn(0, new ComboBoxItemDelegate(kCommonTypes, false, ui->membersTable));
+    ui->membersTable->setItemDelegateForColumn(3, new ComboBoxItemDelegate(kAccessLevels, false, ui->membersTable));
+    ui->membersTable->setItemDelegateForColumn(4, new ComboBoxItemDelegate(kYesNoOptions, false, ui->membersTable));
+    ui->membersTable->setItemDelegateForColumn(5, new ComboBoxItemDelegate(kYesNoOptions, false, ui->membersTable));
+
+    ui->parametersTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    ui->parametersTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    ui->parametersTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    ui->parametersTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
+    ui->parametersTable->setItemDelegateForColumn(0, new ComboBoxItemDelegate(kCommonTypes, false, ui->parametersTable));
+    ui->parametersTable->setItemDelegateForColumn(3, new ComboBoxItemDelegate(kYesNoOptions, false, ui->parametersTable));
+    ui->parametersTable->setColumnHidden(2, true);
+}
+
+void MainWindow::configureVisualStyle()
+{
+    const QFont fixedFont = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    ui->headerPreviewEdit->setFont(fixedFont);
+    ui->sourcePreviewEdit->setFont(fixedFont);
+    ui->logEdit->setFont(fixedFont);
+
+    setStyleSheet(
+        "QMainWindow { background: #edf1f4; }"
+        "QGroupBox {"
+        "  background: #ffffff;"
+        "  border: 1px solid #cfd7df;"
+        "  border-radius: 10px;"
+        "  margin-top: 16px;"
+        "  color: #1b2a37;"
+        "  font-weight: 600;"
+        "}"
+        "QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 6px; }"
+        "QLabel { color: #304352; }"
+        "QLabel#navigationHintLabel { color: #5f7282; padding-bottom: 4px; }"
+        "QLineEdit, QPlainTextEdit, QTextEdit, QTableWidget, QComboBox {"
+        "  background: #fbfcfd;"
+        "  border: 1px solid #c9d3dc;"
+        "  border-radius: 7px;"
+        "  padding: 7px 8px;"
+        "  selection-background-color: #335f7d;"
+        "  color: #1f2d3a;"
+        "}"
+        "QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus, QTableWidget:focus, QComboBox:focus { border-color: #335f7d; }"
+        "QLineEdit[invalid=\"true\"] { border-color: #b55454; background: #fff3f3; color: #7a2525; }"
+        "QTableWidget { gridline-color: #e1e7ed; alternate-background-color: #f3f6f8; }"
+        "QTreeView {"
+        "  background: #fbfcfd;"
+        "  border: 1px solid #c9d3dc;"
+        "  border-radius: 8px;"
+        "  padding: 6px;"
+        "  alternate-background-color: #f3f6f8;"
+        "  show-decoration-selected: 1;"
+        "}"
+        "QTreeView::item { padding: 6px 4px; border-radius: 5px; }"
+        "QTreeView::item:selected { background: #d8e3eb; color: #1c2f3c; }"
+        "QHeaderView::section {"
+        "  background: #e3e9ee;"
+        "  color: #223545;"
+        "  border: none;"
+        "  border-bottom: 1px solid #d1d9e2;"
+        "  padding: 9px 8px;"
+        "  font-weight: 600;"
+        "}"
+        "QPushButton {"
+        "  background: #29485d;"
+        "  color: white;"
+        "  border: none;"
+        "  border-radius: 7px;"
+        "  padding: 9px 16px;"
+        "  min-height: 20px;"
+        "  font-weight: 600;"
+        "}"
+        "QPushButton:hover { background: #223d4f; }"
+        "QPushButton#deleteItemBtn, QPushButton#deleteParameterBtn { background: #b55454; }"
+        "QPushButton#deleteItemBtn:hover, QPushButton#deleteParameterBtn:hover { background: #954343; }"
+        "QPushButton#saveClassBtn { background: #2c6a54; }"
+        "QPushButton#saveClassBtn:hover { background: #245643; }"
+        "QTabWidget::pane { border: 0; }"
+        "QTabBar::tab {"
+        "  background: #dde4ea;"
+        "  color: #33495a;"
+        "  border-radius: 7px;"
+        "  padding: 9px 16px;"
+        "  margin-right: 6px;"
+        "}"
+        "QTabBar::tab:selected { background: #29485d; color: white; }"
+        "QSplitter::handle { background: #d3dbe3; }"
+    );
+}
+
+void MainWindow::updateEditorActionButtons()
+{
+    const bool functionsTabActive = ui->editorTabs->currentIndex() == 0;
+    ui->addFunctionBtn->setVisible(functionsTabActive);
+    ui->addMemberBtn->setVisible(!functionsTabActive);
+    ui->deleteItemBtn->setText(functionsTabActive ? "Delete Function" : "Delete Member");
+}
+
+QString MainWindow::createDefaultClassName(QStandardItem *domainItem) const
+{
+    if (!domainItem) {
+        return "NewClass";
+    }
+
+    int counter = domainItem->rowCount() + 1;
+    while (true) {
+        const QString candidate = QString("NewClass%1").arg(counter);
+        bool exists = false;
+        for (int row = 0; row < domainItem->rowCount(); ++row) {
+            QStandardItem *classItem = domainItem->child(row);
+            if (classItem && classItem->data(RoleName).toString() == candidate) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            return candidate;
+        }
+        ++counter;
+    }
+}
+
+void MainWindow::createClassUnderDomain(QStandardItem *domainItem)
+{
+    if (!domainItem) {
+        return;
+    }
+
+    const QString className = createDefaultClassName(domainItem);
+    QStandardItem *classItem = new QStandardItem(className);
+    classItem->setData(className, RoleName);
+    classItem->setData("Class", RoleType);
+    classItem->setData(domainItem->data(RoleName).toString(), RoleDomain);
+    classItem->setData("QObject", RoleBaseClass);
+
+    const QJsonArray emptyArray;
+    const QString emptyJson = QString::fromUtf8(QJsonDocument(emptyArray).toJson(QJsonDocument::Compact));
+    classItem->setData(emptyJson, RoleFunctions);
+    classItem->setData(emptyJson, RoleMembers);
+
+    domainItem->appendRow(classItem);
+    updateClassItemPresentation(classItem, ClassMeta{className, QString(), domainItem->data(RoleName).toString(), "QObject", {}, {}});
+    ui->treeView->expand(domainItem->index());
+    ui->treeView->setCurrentIndex(classItem->index());
+    ui->editorTabs->setCurrentIndex(0);
+    ui->classNameEdit->setFocus();
+    ui->classNameEdit->selectAll();
+    persistProjectModel();
+}
+
+void MainWindow::insertDefaultFunctionRow()
+{
+    const QSignalBlocker blocker(ui->functionsTable);
+    const int row = ui->functionsTable->rowCount();
+    ui->functionsTable->insertRow(row);
+
+    auto *nameItem = createEditableItem(QString("newFunction%1").arg(row + 1));
+    nameItem->setData(RoleFunctionParameters, QJsonDocument(parameterArrayFromMetaList({})).toJson(QJsonDocument::Compact));
+    ui->functionsTable->setItem(row, 0, nameItem);
+    ui->functionsTable->setItem(row, 1, createEditableItem("void"));
+    ui->functionsTable->setItem(row, 2, createReadOnlyItem(QString()));
+    ui->functionsTable->setItem(row, 3, createEditableItem("No"));
+    ui->functionsTable->setItem(row, 4, createEditableItem("No"));
+    ui->functionsTable->setItem(row, 5, createEditableItem("No"));
+    ui->functionsTable->setItem(row, 6, createEditableItem("public"));
+
+    ui->editorTabs->setCurrentIndex(0);
+    ui->functionsTable->selectRow(row);
+    ui->functionsTable->editItem(nameItem);
+    loadParameterEditorFromSelectedFunction();
+    loadFunctionOptionsFromSelectedFunction();
+    refreshPreview();
+    persistProjectModel();
+}
+
+void MainWindow::insertDefaultMemberRow()
+{
+    const QSignalBlocker blocker(ui->membersTable);
+    const int row = ui->membersTable->rowCount();
+    ui->membersTable->insertRow(row);
+    ui->membersTable->setItem(row, 0, createEditableItem("int"));
+    ui->membersTable->setItem(row, 1, createEditableItem(QString("m_member%1").arg(row + 1)));
+    ui->membersTable->setItem(row, 2, createEditableItem(QString()));
+    ui->membersTable->setItem(row, 3, createEditableItem("private"));
+    ui->membersTable->setItem(row, 4, createEditableItem("No"));
+    ui->membersTable->setItem(row, 5, createEditableItem("No"));
+
+    ui->editorTabs->setCurrentIndex(1);
+    ui->membersTable->selectRow(row);
+    if (QTableWidgetItem *nameItem = ui->membersTable->item(row, 1)) {
+        ui->membersTable->editItem(nameItem);
+    }
+    loadMemberOptionsFromSelectedMember();
+    refreshPreview();
+    persistProjectModel();
+}
+
+bool MainWindow::validateClassMeta(const ClassMeta &meta, QStandardItem *targetClassItem, QString *message) const
+{
+    QStringList issues;
+    const QString className = meta.className.trimmed();
+
+    if (!isValidCppIdentifier(className)) {
+        issues << "Class name must be a valid C++ identifier.";
+    }
+
+    QStandardItem *domainItem = targetClassItem ? targetClassItem->parent() : nullptr;
+    if (!domainItem && !meta.domainKey.isEmpty()) {
+        domainItem = findDomainItem(m_model, meta.domainKey);
+    }
+
+    if (domainItem) {
+        for (int row = 0; row < domainItem->rowCount(); ++row) {
+            QStandardItem *sibling = domainItem->child(row);
+            if (!sibling || sibling == targetClassItem || sibling->data(RoleType).toString() != "Class") {
+                continue;
+            }
+            if (sibling->data(RoleName).toString().compare(className, Qt::CaseSensitive) == 0) {
+                issues << QString("Class '%1' already exists in this domain.").arg(className);
+                break;
+            }
+        }
+    }
+
+    QSet<QString> memberNames;
+    for (const MemberMeta &member : meta.members) {
+        const QString memberName = member.name.trimmed();
+        if (!isLikelyValidCppType(member.type, false)) {
+            issues << QString("Member '%1' has an invalid type '%2'.").arg(member.name, member.type);
+        }
+        if (!isValidCppIdentifier(memberName)) {
+            issues << QString("Member '%1' is not a valid C++ identifier.").arg(member.name);
+            continue;
+        }
+        if (memberNames.contains(memberName)) {
+            issues << QString("Member '%1' is duplicated.").arg(memberName);
+        }
+        memberNames.insert(memberName);
+    }
+
+    QSet<QString> functionSignatures;
+    for (const FunctionMeta &function : meta.functions) {
+        const QString functionName = function.name.trimmed();
+        if (!isLikelyValidCppType(function.returnType, true)) {
+            issues << QString("Function '%1' has an invalid return type '%2'.").arg(function.name, function.returnType);
+        }
+        if (!isValidCppIdentifier(functionName)) {
+            issues << QString("Function '%1' is not a valid C++ identifier.").arg(function.name);
+            continue;
+        }
+
+        QStringList parameterTypes;
+        QSet<QString> parameterNames;
+        for (const ParamMeta &param : function.parameters) {
+            const QString paramName = param.name.trimmed();
+            if (!isLikelyValidCppType(param.type, false)) {
+                issues << QString("Parameter '%1' in function '%2' has invalid type '%3'.").arg(param.name, functionName, param.type);
+            }
+            if (paramName.isEmpty()) {
+                issues << QString("Function '%1' contains a parameter without a name.").arg(functionName);
+            } else if (!isValidCppIdentifier(paramName)) {
+                issues << QString("Parameter '%1' in function '%2' is invalid.").arg(param.name, functionName);
+            }
+            if (!paramName.isEmpty() && parameterNames.contains(paramName)) {
+                issues << QString("Function '%1' contains duplicate parameter '%2'.").arg(functionName, paramName);
+            }
+            if (!paramName.isEmpty()) {
+                parameterNames.insert(paramName);
+            }
+            parameterTypes << param.type.trimmed();
+        }
+
+        const QString signatureKey = functionName + "|" + parameterTypes.join(',');
+        if (functionSignatures.contains(signatureKey)) {
+            issues << QString("Function '%1' has a duplicate signature.").arg(functionName);
+        }
+        functionSignatures.insert(signatureKey);
+    }
+
+    issues.removeDuplicates();
+    if (message) {
+        *message = issues.join("\n");
+    }
+    return issues.isEmpty();
+}
+
+void MainWindow::updateClassItemPresentation(QStandardItem *classItem, const ClassMeta &meta)
+{
+    if (!classItem) {
+        return;
+    }
+
+    classItem->setText(QString("%1  [F%2 M%3]").arg(meta.className).arg(meta.functions.count()).arg(meta.members.count()));
+    classItem->setIcon(QIcon(QStringLiteral(":/icons/class.svg")));
+
+    for (int row = 0; row < classItem->rowCount(); ++row) {
+        QStandardItem *functionItem = classItem->child(row);
+        if (!functionItem || functionItem->data(RoleType).toString() != "Function") {
+            continue;
+        }
+        functionItem->setIcon(QIcon(QStringLiteral(":/icons/function.svg")));
+    }
+
+    updateDomainItemPresentation(classItem->parent());
+}
+
+void MainWindow::updateDomainItemPresentation(QStandardItem *domainItem)
+{
+    if (!domainItem) {
+        return;
+    }
+
+    int classCount = 0;
+    for (int row = 0; row < domainItem->rowCount(); ++row) {
+        QStandardItem *classItem = domainItem->child(row);
+        if (classItem && classItem->data(RoleType).toString() == "Class") {
+            ++classCount;
+        }
+    }
+
+    domainItem->setText(QString("%1  [%2]").arg(domainItem->data(RoleName).toString()).arg(classCount));
+    domainItem->setIcon(QIcon(QStringLiteral(":/icons/domain.svg")));
+}
+
+void MainWindow::refreshTreePresentation()
+{
+    for (int row = 0; row < m_model->rowCount(); ++row) {
+        QStandardItem *domainItem = m_model->item(row);
+        if (!domainItem || domainItem->data(RoleType).toString() != "Domain") {
+            continue;
+        }
+
+        updateDomainItemPresentation(domainItem);
+        for (int childRow = 0; childRow < domainItem->rowCount(); ++childRow) {
+            QStandardItem *classItem = domainItem->child(childRow);
+            if (!classItem || classItem->data(RoleType).toString() != "Class") {
+                continue;
+            }
+            updateClassItemPresentation(classItem, classMetaFromItem(classItem));
+        }
+    }
+}
+
+void MainWindow::updateValidationFeedback()
+{
+    setLineEditValidationState(ui->classNameEdit, true);
+
+    for (int row = 0; row < ui->functionsTable->rowCount(); ++row) {
+        for (int column = 0; column < ui->functionsTable->columnCount(); ++column) {
+            setItemValidationState(ui->functionsTable->item(row, column), true);
+        }
+    }
+
+    for (int row = 0; row < ui->membersTable->rowCount(); ++row) {
+        for (int column = 0; column < ui->membersTable->columnCount(); ++column) {
+            setItemValidationState(ui->membersTable->item(row, column), true);
+        }
+    }
+
+    for (int row = 0; row < ui->parametersTable->rowCount(); ++row) {
+        for (int column = 0; column < ui->parametersTable->columnCount(); ++column) {
+            setItemValidationState(ui->parametersTable->item(row, column), true);
+        }
+    }
+
+    if (!m_currentClassItem) {
+        ui->saveClassBtn->setEnabled(false);
+        statusBar()->showMessage("Select a class to edit.", 2000);
+        return;
+    }
+
+    const ClassMeta meta = getClassMetaFromPanel();
+    QStringList issues;
+
+    if (!isValidCppIdentifier(meta.className.trimmed())) {
+        const QString message = "Class name must be a valid C++ identifier.";
+        setLineEditValidationState(ui->classNameEdit, false, message);
+        issues << message;
+    } else {
+        QStandardItem *domainItem = m_currentClassItem->parent();
+        if (domainItem) {
+            for (int row = 0; row < domainItem->rowCount(); ++row) {
+                QStandardItem *sibling = domainItem->child(row);
+                if (!sibling || sibling == m_currentClassItem || sibling->data(RoleType).toString() != "Class") {
+                    continue;
+                }
+                if (sibling->data(RoleName).toString() == meta.className.trimmed()) {
+                    const QString message = QString("Class '%1' already exists in this domain.").arg(meta.className.trimmed());
+                    setLineEditValidationState(ui->classNameEdit, false, message);
+                    issues << message;
+                    break;
+                }
+            }
+        }
+    }
+
+    QHash<QString, QList<int>> functionRowsBySignature;
+    for (int row = 0; row < meta.functions.count(); ++row) {
+        const FunctionMeta &function = meta.functions.at(row);
+        const QString functionName = function.name.trimmed();
+
+        if (!isLikelyValidCppType(function.returnType, true)) {
+            const QString message = QString("Function '%1' has an invalid return type '%2'.").arg(function.name, function.returnType);
+            setItemValidationState(ui->functionsTable->item(row, 1), false, message);
+            issues << message;
+        }
+
+        if (!isValidCppIdentifier(functionName)) {
+            const QString message = QString("Function '%1' is not a valid C++ identifier.").arg(function.name);
+            setItemValidationState(ui->functionsTable->item(row, 0), false, message);
+            issues << message;
+        }
+
+        QStringList parameterTypes;
+        QSet<QString> parameterNames;
+        for (const ParamMeta &param : function.parameters) {
+            parameterTypes << param.type.trimmed();
+            const QString paramName = param.name.trimmed();
+            if (!isLikelyValidCppType(param.type, false)) {
+                const QString message = QString("Parameter '%1' in function '%2' has invalid type '%3'.").arg(param.name, functionName, param.type);
+                issues << message;
+            }
+            if (!paramName.isEmpty()) {
+                if (parameterNames.contains(paramName)) {
+                    const QString message = QString("Function '%1' contains duplicate parameter '%2'.").arg(functionName, paramName);
+                    issues << message;
+                }
+                parameterNames.insert(paramName);
+            }
+        }
+
+        functionRowsBySignature[functionName + "|" + parameterTypes.join(',')].append(row);
+    }
+
+    for (auto it = functionRowsBySignature.cbegin(); it != functionRowsBySignature.cend(); ++it) {
+        if (it.value().size() < 2) {
+            continue;
+        }
+        for (int row : it.value()) {
+            const QString message = QString("Function '%1' has a duplicate signature.").arg(ui->functionsTable->item(row, 0) ? ui->functionsTable->item(row, 0)->text() : QString());
+            setItemValidationState(ui->functionsTable->item(row, 0), false, message);
+            issues << message;
+        }
+    }
+
+    QHash<QString, QList<int>> memberRowsByName;
+    for (int row = 0; row < meta.members.count(); ++row) {
+        const QString memberName = meta.members.at(row).name.trimmed();
+        if (!isLikelyValidCppType(meta.members.at(row).type, false)) {
+            const QString message = QString("Member '%1' has an invalid type '%2'.").arg(meta.members.at(row).name, meta.members.at(row).type);
+            setItemValidationState(ui->membersTable->item(row, 0), false, message);
+            issues << message;
+        }
+        if (!isValidCppIdentifier(memberName)) {
+            const QString message = QString("Member '%1' is not a valid C++ identifier.").arg(meta.members.at(row).name);
+            setItemValidationState(ui->membersTable->item(row, 1), false, message);
+            issues << message;
+        }
+        memberRowsByName[memberName].append(row);
+    }
+
+    for (auto it = memberRowsByName.cbegin(); it != memberRowsByName.cend(); ++it) {
+        if (it.key().isEmpty() || it.value().size() < 2) {
+            continue;
+        }
+        for (int row : it.value()) {
+            const QString message = QString("Member '%1' is duplicated.").arg(it.key());
+            setItemValidationState(ui->membersTable->item(row, 1), false, message);
+            issues << message;
+        }
+    }
+
+    const int functionRow = ui->functionsTable->currentRow();
+    if (functionRow >= 0 && functionRow < meta.functions.count()) {
+        QHash<QString, QList<int>> parameterRowsByName;
+        const QList<ParamMeta> parameters = meta.functions.at(functionRow).parameters;
+        for (int row = 0; row < parameters.count(); ++row) {
+            const QString paramName = parameters.at(row).name.trimmed();
+            if (!isLikelyValidCppType(parameters.at(row).type, false)) {
+                const QString message = QString("Parameter '%1' in function '%2' has invalid type '%3'.").arg(parameters.at(row).name, meta.functions.at(functionRow).name, parameters.at(row).type);
+                setItemValidationState(ui->parametersTable->item(row, 0), false, message);
+                issues << message;
+            }
+            if (paramName.isEmpty()) {
+                const QString message = QString("Function '%1' contains a parameter without a name.").arg(meta.functions.at(functionRow).name);
+                setItemValidationState(ui->parametersTable->item(row, 1), false, message);
+                issues << message;
+                continue;
+            }
+            if (!isValidCppIdentifier(paramName)) {
+                const QString message = QString("Parameter '%1' in function '%2' is invalid.").arg(parameters.at(row).name, meta.functions.at(functionRow).name);
+                setItemValidationState(ui->parametersTable->item(row, 1), false, message);
+                issues << message;
+            }
+            parameterRowsByName[paramName].append(row);
+        }
+
+        for (auto it = parameterRowsByName.cbegin(); it != parameterRowsByName.cend(); ++it) {
+            if (it.key().isEmpty() || it.value().size() < 2) {
+                continue;
+            }
+            for (int row : it.value()) {
+                const QString message = QString("Function '%1' contains duplicate parameter '%2'.").arg(meta.functions.at(functionRow).name, it.key());
+                setItemValidationState(ui->parametersTable->item(row, 1), false, message);
+                issues << message;
+            }
+        }
+    }
+
+    issues.removeDuplicates();
+    const bool valid = issues.isEmpty();
+    ui->saveClassBtn->setEnabled(valid);
+    statusBar()->showMessage(valid ? QString("Editing %1").arg(meta.className.trimmed().isEmpty() ? QString("class") : meta.className.trimmed())
+                                   : QString("Validation: %1").arg(issues.first()),
+                             3000);
 }
 
 void MainWindow::initializeDefaultDomains()
@@ -536,11 +1596,15 @@ void MainWindow::initializeDefaultDomains()
         item->setData("Domain", Qt::UserRole + 2); // 标记类型
         m_model->appendRow(item);
     }
+
+    refreshTreePresentation();
 }
 
 void MainWindow::updateOutputPathDisplay()
 {
-    ui->outputPathEdit->setText(QDir::toNativeSeparators(m_projectRootPath));
+    if (QLineEdit *outputPathEdit = findChild<QLineEdit *>("outputPathEdit")) {
+        outputPathEdit->setText(QDir::toNativeSeparators(m_projectRootPath));
+    }
     statusBar()->showMessage(QString("Output directory: %1").arg(QDir::toNativeSeparators(m_projectRootPath)));
 }
 
@@ -573,28 +1637,8 @@ void MainWindow::onAddNewClassFromContextMenu()
     }
     
     if (!domainItem) return;
-    
-    bool ok;
-    QString className = QInputDialog::getText(this, "New Class", "Enter Class Name:", QLineEdit::Normal, "", &ok);
-    if (ok && !className.isEmpty()) {
-        QStandardItem *classItem = new QStandardItem(className);
-        classItem->setData(className, Qt::UserRole + 1); // ClassName
-        classItem->setData("Class", Qt::UserRole + 2);   // Type
-        classItem->setData(domainItem->data(Qt::UserRole + 1).toString(), Qt::UserRole + 3); // Parent Domain Key
-        classItem->setData("QObject", Qt::UserRole + 5); // BaseClass
-        
-        // 初始化空的函数和成员变量JSON
-        QJsonArray emptyArray;
-        classItem->setData(QString::fromUtf8(QJsonDocument(emptyArray).toJson(QJsonDocument::Compact)), Qt::UserRole + 4); // Functions JSON
-        classItem->setData(QString::fromUtf8(QJsonDocument(emptyArray).toJson(QJsonDocument::Compact)), Qt::UserRole + 6); // Members JSON
-        
-        domainItem->appendRow(classItem);
-        ui->treeView->expand(domainItem->index());
-        
-        // 选中新添加的节点
-        ui->treeView->setCurrentIndex(classItem->index());
-        persistProjectModel();
-    }
+
+    createClassUnderDomain(domainItem);
 }
 
 void MainWindow::onActionNewClass()
@@ -611,91 +1655,24 @@ void MainWindow::onActionNewClass()
         parentItem = parentItem->parent();
     }
 
-    bool ok;
-    QString className = QInputDialog::getText(this, "New Class", "Enter Class Name:", QLineEdit::Normal, "", &ok);
-    if (ok && !className.isEmpty()) {
-        QStandardItem *classItem = new QStandardItem(className);
-        classItem->setData(className, Qt::UserRole + 1); // ClassName
-        classItem->setData("Class", Qt::UserRole + 2);   // Type
-        classItem->setData(parentItem->data(Qt::UserRole + 1).toString(), Qt::UserRole + 3); // Parent Domain Key
-        classItem->setData("QObject", Qt::UserRole + 5); // BaseClass
-        
-        // 初始化空的函数和成员变量JSON
-        QJsonArray emptyArray;
-        classItem->setData(QString::fromUtf8(QJsonDocument(emptyArray).toJson(QJsonDocument::Compact)), Qt::UserRole + 4); // Functions JSON
-        classItem->setData(QString::fromUtf8(QJsonDocument(emptyArray).toJson(QJsonDocument::Compact)), Qt::UserRole + 6); // Members JSON
-
-        parentItem->appendRow(classItem);
-        ui->treeView->expand(parentItem->index());
-        
-        // 选中新添加的节点
-        ui->treeView->setCurrentIndex(classItem->index());
-        persistProjectModel();
-    }
+    createClassUnderDomain(parentItem);
 }
 
 void MainWindow::onActionNewFunction()
 {
-    QModelIndex index = ui->treeView->currentIndex();
-    if (!index.isValid()) {
+    QStandardItem *classItem = resolveClassItem(m_model->itemFromIndex(ui->treeView->currentIndex()));
+    if (!classItem) {
         QMessageBox::warning(this, "Tip", "Please select a Class to add function.");
         return;
     }
 
-    QStandardItem *item = m_model->itemFromIndex(index);
-    if (item->data(Qt::UserRole + 2).toString() != "Class") {
-        QMessageBox::warning(this, "Tip", "Please select a Class node.");
-        return;
+    if (m_currentClassItem && m_currentClassItem == classItem) {
+        saveClassInfoToNode(classItem, getClassMetaFromPanel());
     }
 
-    bool ok;
-    QString funcName = QInputDialog::getText(this, "New Function", "Function name:", QLineEdit::Normal, "", &ok);
-    if (!ok || funcName.isEmpty()) return;
-
-    QString returnType = QInputDialog::getText(this, "New Function", "Return type:", QLineEdit::Normal, "void", &ok);
-    if (!ok || returnType.isEmpty()) return;
-
-    int paramCount = QInputDialog::getInt(this, "New Function", "Parameter count:", 0, 0, 32, 1, &ok);
-    if (!ok) return;
-
-    QJsonArray paramsArr;
-    for (int i = 0; i < paramCount; ++i) {
-        QString pType = QInputDialog::getText(this, "Param", QString("Param %1 type:").arg(i+1), QLineEdit::Normal, "int", &ok);
-        if (!ok) return;
-        QString pName = QInputDialog::getText(this, "Param", QString("Param %1 name:").arg(i+1), QLineEdit::Normal, QString("p%1").arg(i+1), &ok);
-        if (!ok) return;
-        QJsonObject pObj;
-        pObj["type"] = pType;
-        pObj["name"] = pName;
-        pObj["defaultValue"] = "";
-        pObj["isConstRef"] = false;
-        paramsArr.append(pObj);
-    }
-
-    // 简单选择是否 const
-    bool isConst = false;
-    int rc = QMessageBox::question(this, "Const Method?", "Should the method be const?", QMessageBox::Yes | QMessageBox::No);
-    if (rc == QMessageBox::Yes) isConst = true;
-
-    QJsonObject funcObj;
-    funcObj["name"] = funcName;
-    funcObj["returnType"] = returnType;
-    funcObj["access"] = "public";
-    funcObj["isConst"] = isConst;
-    funcObj["isStatic"] = false;
-    funcObj["isVirtual"] = false;
-    funcObj["parameters"] = paramsArr;
-
-    QStandardItem *funcItem = new QStandardItem(funcName + "() : " + returnType);
-    funcItem->setData("Function", Qt::UserRole + 2);
-    funcItem->setData(QString::fromUtf8(QJsonDocument(funcObj).toJson(QJsonDocument::Compact)), Qt::UserRole + 4);
-
-    item->appendRow(funcItem);
-    ui->treeView->expand(item->index());
-    
-    // 更新右侧面板
-    updateClassInfoPanel(item);
-    persistProjectModel();
+    m_currentClassItem = classItem;
+    updateClassInfoPanel(classItem);
+    insertDefaultFunctionRow();
 }
 
 void MainWindow::onActionSaveTemplate()
@@ -770,7 +1747,13 @@ void MainWindow::onActionGenerate()
         return;
     }
 
-    bool success = m_engine->generateClass(meta, m_projectRootPath);
+    QString validationMessage;
+    if (!validateClassMeta(meta, classItem, &validationMessage)) {
+        QMessageBox::warning(this, "Invalid Class Definition", validationMessage);
+        return;
+    }
+
+        bool success = m_engine->generateClass(meta, m_projectRootPath);
     if (success) {
         persistProjectModel();
         QMessageBox::information(this, "Success",
@@ -787,7 +1770,13 @@ ClassMeta MainWindow::getCurrentClassMeta() const
         return {};
     }
 
-    return classMetaFromItem(m_model->itemFromIndex(index));
+    QStandardItem *classItem = resolveClassItem(m_model->itemFromIndex(index));
+    ClassMeta meta;
+    if (tryLoadManagedClassMetaFromFilesystem(classItem, &meta)) {
+        return meta;
+    }
+
+    return classMetaFromItem(classItem);
 }
 
 void MainWindow::onTreeSelectionChanged() {
@@ -843,6 +1832,9 @@ void MainWindow::clearClassInfoPanel()
     const QSignalBlocker staticBlocker(ui->funcStaticCheck);
     const QSignalBlocker virtualBlocker(ui->funcVirtualCheck);
     const QSignalBlocker accessBlocker(ui->funcAccessCombo);
+    const QSignalBlocker memberAccessBlocker(ui->memberAccessCombo);
+    const QSignalBlocker memberStaticBlocker(ui->memberStaticCheck);
+    const QSignalBlocker memberConstexprBlocker(ui->memberConstexprCheck);
 
     ui->classNameEdit->clear();
     ui->baseClassEdit->setText("QObject");
@@ -853,14 +1845,20 @@ void MainWindow::clearClassInfoPanel()
     ui->funcStaticCheck->setChecked(false);
     ui->funcVirtualCheck->setChecked(false);
     ui->funcAccessCombo->setCurrentText("public");
+    ui->memberAccessCombo->setCurrentText("private");
+    ui->memberStaticCheck->setChecked(false);
+    ui->memberConstexprCheck->setChecked(false);
     ui->headerPreviewEdit->clear();
     ui->sourcePreviewEdit->clear();
     m_currentClassItem = nullptr;
+    updateValidationFeedback();
 }
 
 void MainWindow::updateClassInfoPanel(QStandardItem *classItem)
 {
     if (!classItem) return;
+
+    syncClassItemFromFilesystem(classItem);
 
     const QSignalBlocker classNameBlocker(ui->classNameEdit);
     const QSignalBlocker baseClassBlocker(ui->baseClassEdit);
@@ -871,6 +1869,9 @@ void MainWindow::updateClassInfoPanel(QStandardItem *classItem)
     const QSignalBlocker staticBlocker(ui->funcStaticCheck);
     const QSignalBlocker virtualBlocker(ui->funcVirtualCheck);
     const QSignalBlocker accessBlocker(ui->funcAccessCombo);
+    const QSignalBlocker memberAccessBlocker(ui->memberAccessCombo);
+    const QSignalBlocker memberStaticBlocker(ui->memberStaticCheck);
+    const QSignalBlocker memberConstexprBlocker(ui->memberConstexprCheck);
 
     const ClassMeta meta = classMetaFromItem(classItem);
     ui->classNameEdit->setText(meta.className);
@@ -879,24 +1880,26 @@ void MainWindow::updateClassInfoPanel(QStandardItem *classItem)
     ui->functionsTable->setRowCount(meta.functions.count());
     for (int row = 0; row < meta.functions.count(); ++row) {
         const FunctionMeta &function = meta.functions.at(row);
-        QTableWidgetItem *nameItem = new QTableWidgetItem(function.name);
+        QTableWidgetItem *nameItem = createEditableItem(function.name);
         nameItem->setData(RoleFunctionParameters, QJsonDocument(parameterArrayFromMetaList(function.parameters)).toJson(QJsonDocument::Compact));
         ui->functionsTable->setItem(row, 0, nameItem);
-        ui->functionsTable->setItem(row, 1, new QTableWidgetItem(function.returnType));
-        ui->functionsTable->setItem(row, 2, new QTableWidgetItem(parameterSummary(function.parameters)));
-        ui->functionsTable->setItem(row, 3, new QTableWidgetItem(boolToYesNo(function.isConst)));
-        ui->functionsTable->setItem(row, 4, new QTableWidgetItem(boolToYesNo(function.isStatic)));
-        ui->functionsTable->setItem(row, 5, new QTableWidgetItem(boolToYesNo(function.isVirtual)));
-        ui->functionsTable->setItem(row, 6, new QTableWidgetItem(normalizeAccessSpecifier(function.access, "public")));
+        ui->functionsTable->setItem(row, 1, createEditableItem(function.returnType));
+        ui->functionsTable->setItem(row, 2, createReadOnlyItem(parameterSummary(function.parameters)));
+        ui->functionsTable->setItem(row, 3, createEditableItem(boolToYesNo(function.isConst)));
+        ui->functionsTable->setItem(row, 4, createEditableItem(boolToYesNo(function.isStatic)));
+        ui->functionsTable->setItem(row, 5, createEditableItem(boolToYesNo(function.isVirtual)));
+        ui->functionsTable->setItem(row, 6, createEditableItem(normalizeAccessSpecifier(function.access, "public")));
     }
 
     ui->membersTable->setRowCount(meta.members.count());
     for (int row = 0; row < meta.members.count(); ++row) {
         const MemberMeta &member = meta.members.at(row);
-        ui->membersTable->setItem(row, 0, new QTableWidgetItem(member.type));
-        ui->membersTable->setItem(row, 1, new QTableWidgetItem(member.name));
-        ui->membersTable->setItem(row, 2, new QTableWidgetItem(member.defaultValue));
-        ui->membersTable->setItem(row, 3, new QTableWidgetItem(normalizeAccessSpecifier(member.access, "private")));
+        ui->membersTable->setItem(row, 0, createEditableItem(member.type));
+        ui->membersTable->setItem(row, 1, createEditableItem(member.name));
+        ui->membersTable->setItem(row, 2, createEditableItem(member.defaultValue));
+        ui->membersTable->setItem(row, 3, createEditableItem(normalizeAccessSpecifier(member.access, "private")));
+        ui->membersTable->setItem(row, 4, createEditableItem(boolToYesNo(member.isStatic)));
+        ui->membersTable->setItem(row, 5, createEditableItem(boolToYesNo(member.isConstexpr)));
     }
 
     if (ui->functionsTable->rowCount() > 0) {
@@ -911,7 +1914,17 @@ void MainWindow::updateClassInfoPanel(QStandardItem *classItem)
         ui->funcAccessCombo->setCurrentText("public");
     }
 
+    if (ui->membersTable->rowCount() > 0) {
+        ui->membersTable->selectRow(0);
+        loadMemberOptionsFromSelectedMember();
+    } else {
+        ui->memberAccessCombo->setCurrentText("private");
+        ui->memberStaticCheck->setChecked(false);
+        ui->memberConstexprCheck->setChecked(false);
+    }
+
     refreshPreview();
+    updateValidationFeedback();
 }
 
 ClassMeta MainWindow::getClassMetaFromPanel() const
@@ -963,6 +1976,8 @@ ClassMeta MainWindow::getClassMetaFromPanel() const
         member.name = nameItem->text();
         member.defaultValue = defaultItem ? defaultItem->text() : "";
         member.access = normalizeAccessSpecifier(ui->membersTable->item(i, 3) ? ui->membersTable->item(i, 3)->text() : QString(), "private");
+        member.isStatic = ui->membersTable->item(i, 4) && yesNoToBool(ui->membersTable->item(i, 4)->text());
+        member.isConstexpr = ui->membersTable->item(i, 5) && yesNoToBool(ui->membersTable->item(i, 5)->text());
         
         meta.members.append(member);
     }
@@ -975,7 +1990,6 @@ void MainWindow::saveClassInfoToNode(QStandardItem *classItem, const ClassMeta &
     if (!classItem) return;
 
     classItem->setData(meta.className, RoleName);
-    classItem->setText(meta.className);
     classItem->setData(meta.baseClass, RoleBaseClass);
 
     QJsonArray funcArray;
@@ -997,6 +2011,8 @@ void MainWindow::saveClassInfoToNode(QStandardItem *classItem, const ClassMeta &
         funcItem->setData(QString::fromUtf8(QJsonDocument(functionObjectFromMeta(func)).toJson(QJsonDocument::Compact)), RoleFunctions);
         classItem->appendRow(funcItem);
     }
+
+    updateClassItemPresentation(classItem, meta);
 }
 
 void MainWindow::onAddFunctionClicked()
@@ -1005,65 +2021,8 @@ void MainWindow::onAddFunctionClicked()
         QMessageBox::warning(this, "Tip", "Please select a Class first.");
         return;
     }
-    
-    bool ok;
-    QString funcName = QInputDialog::getText(this, "Add Function", "Function name:", QLineEdit::Normal, "", &ok);
-    if (!ok || funcName.isEmpty()) return;
 
-    QString returnType = QInputDialog::getText(this, "Add Function", "Return type:", QLineEdit::Normal, "void", &ok);
-    if (!ok || returnType.isEmpty()) return;
-
-    // 询问是否有参数
-    int rc = QMessageBox::question(this, "Parameters", "Do you want to add parameters?", QMessageBox::Yes | QMessageBox::No);
-    
-    QString paramsStr = "";
-    QJsonArray paramsArr;
-    
-    if (rc == QMessageBox::Yes) {
-        // 让用户输入参数字符串
-        paramsStr = QInputDialog::getText(this, "Add Function", 
-            "Parameters (format: type1 name1, type2 name2):", 
-            QLineEdit::Normal, "", &ok);
-        
-        if (ok && !paramsStr.isEmpty()) {
-            // 解析参数字符串
-            QStringList paramList = paramsStr.split(",");
-            for (const QString &p : paramList) {
-                QStringList parts = p.trimmed().split(" ");
-                if (parts.count() >= 2) {
-                    ParamMeta pm;
-                    pm.type = parts[0];
-                    pm.name = parts[1];
-                    pm.defaultValue = "";
-                    pm.isConstRef = false;
-                    paramsArr.append(QJsonObject{{"type", pm.type}, {"name", pm.name}, {"defaultValue", pm.defaultValue}, {"isConstRef", pm.isConstRef}});
-                }
-            }
-        }
-    }
-
-    // 询问是否是const函数
-    bool isConst = false;
-    rc = QMessageBox::question(this, "Const Method?", "Should the method be const?", QMessageBox::Yes | QMessageBox::No);
-    if (rc == QMessageBox::Yes) isConst = true;
-
-    // 添加到表格
-    int row = ui->functionsTable->rowCount();
-    ui->functionsTable->insertRow(row);
-    QTableWidgetItem *nameItem = new QTableWidgetItem(funcName);
-    nameItem->setData(RoleFunctionParameters, QJsonDocument(paramsArr).toJson(QJsonDocument::Compact));
-    ui->functionsTable->setItem(row, 0, nameItem);
-    ui->functionsTable->setItem(row, 1, new QTableWidgetItem(returnType));
-    ui->functionsTable->setItem(row, 2, new QTableWidgetItem(parameterSummary(paramsArr)));
-    ui->functionsTable->setItem(row, 3, new QTableWidgetItem(boolToYesNo(isConst)));
-    ui->functionsTable->setItem(row, 4, new QTableWidgetItem("No"));
-    ui->functionsTable->setItem(row, 5, new QTableWidgetItem("No"));
-    ui->functionsTable->setItem(row, 6, new QTableWidgetItem("public"));
-    ui->functionsTable->selectRow(row);
-    loadParameterEditorFromSelectedFunction();
-    loadFunctionOptionsFromSelectedFunction();
-    refreshPreview();
-    persistProjectModel();
+    insertDefaultFunctionRow();
 }
 
 void MainWindow::onAddMemberClicked()
@@ -1073,30 +2032,15 @@ void MainWindow::onAddMemberClicked()
         return;
     }
     
-    bool ok;
-    QString type = QInputDialog::getText(this, "Add Member", "Member type (e.g. int, QString):", QLineEdit::Normal, "int", &ok);
-    if (!ok || type.isEmpty()) return;
-    
-    QString name = QInputDialog::getText(this, "Add Member", "Member name (e.g. m_count):", QLineEdit::Normal, "", &ok);
-    if (!ok || name.isEmpty()) return;
-    
-    QString defaultValue = QInputDialog::getText(this, "Add Member", "Default value (optional):", QLineEdit::Normal, "", &ok);
-    
-    // 添加到表格
-    int row = ui->membersTable->rowCount();
-    ui->membersTable->insertRow(row);
-    ui->membersTable->setItem(row, 0, new QTableWidgetItem(type));
-    ui->membersTable->setItem(row, 1, new QTableWidgetItem(name));
-    ui->membersTable->setItem(row, 2, new QTableWidgetItem(defaultValue));
-    ui->membersTable->setItem(row, 3, new QTableWidgetItem("private"));
-    refreshPreview();
-    persistProjectModel();
+
+    insertDefaultMemberRow();
 }
 
 void MainWindow::onDeleteItemClicked()
 {
-    // 检查哪个表格有选中项
-    if (ui->functionsTable->currentRow() >= 0) {
+    const bool functionsTabActive = ui->editorTabs->currentIndex() == 0;
+
+    if (functionsTabActive && ui->functionsTable->currentRow() >= 0) {
         ui->functionsTable->removeRow(ui->functionsTable->currentRow());
         loadParameterEditorFromSelectedFunction();
         refreshPreview();
@@ -1104,19 +2048,15 @@ void MainWindow::onDeleteItemClicked()
         return;
     }
 
-    if (ui->parametersTable->currentRow() >= 0) {
-        onDeleteParameterClicked();
-        return;
-    }
-    
-    if (ui->membersTable->currentRow() >= 0) {
+    if (!functionsTabActive && ui->membersTable->currentRow() >= 0) {
         ui->membersTable->removeRow(ui->membersTable->currentRow());
+        loadMemberOptionsFromSelectedMember();
         refreshPreview();
         persistProjectModel();
         return;
     }
-    
-    QMessageBox::information(this, "Tip", "Please select an item to delete from the tables.");
+
+    QMessageBox::information(this, "Tip", functionsTabActive ? "Please select a function row to delete." : "Please select a member row to delete.");
 }
 
 void MainWindow::onSaveClassClicked()
@@ -1131,6 +2071,12 @@ void MainWindow::onSaveClassClicked()
     
     if (meta.className.isEmpty()) {
         QMessageBox::warning(this, "Error", "Class name cannot be empty.");
+        return;
+    }
+
+    QString validationMessage;
+    if (!validateClassMeta(meta, m_currentClassItem, &validationMessage)) {
+        QMessageBox::warning(this, "Invalid Class Definition", validationMessage);
         return;
     }
     
@@ -1174,6 +2120,13 @@ void MainWindow::onActionGenerateAll()
 
             ClassMeta meta = classMetaFromItem(classItem);
             meta.domainKey = domainKey;
+
+            QString validationMessage;
+            if (!validateClassMeta(meta, classItem, &validationMessage)) {
+                QMessageBox::warning(this, "Invalid Class Definition",
+                                     QString("Class '%1' is invalid:\n\n%2").arg(meta.className, validationMessage));
+                return;
+            }
             
             bool success = m_engine->generateClass(meta, m_projectRootPath);
             if (success) {
@@ -1204,7 +2157,15 @@ void MainWindow::onActionOpenProject()
         if (!loadProjectModel(m_projectRootPath)) {
             initializeDefaultDomains();
             clearClassInfoPanel();
-            ui->logEdit->append("No existing project metadata found. Started a new model.");
+            const bool imported = reconcileModelWithFilesystem();
+            refreshTreePresentation();
+            ui->treeView->expandAll();
+            if (imported) {
+                persistProjectModel();
+                ui->logEdit->append("No existing project metadata found. Imported managed classes from disk.");
+            } else {
+                ui->logEdit->append("No existing project metadata found. Started a new model.");
+            }
         }
     }
 }
@@ -1232,11 +2193,28 @@ void MainWindow::onFunctionSelectionChanged()
 {
     loadParameterEditorFromSelectedFunction();
     loadFunctionOptionsFromSelectedFunction();
+    updateValidationFeedback();
 }
 
 void MainWindow::onFunctionFlagsChanged()
 {
     syncSelectedFunctionFlags();
+}
+
+void MainWindow::onMemberSelectionChanged()
+{
+    loadMemberOptionsFromSelectedMember();
+    updateValidationFeedback();
+}
+
+void MainWindow::onMemberFlagsChanged()
+{
+    syncSelectedMemberFlags();
+}
+
+void MainWindow::onEditorTabChanged(int)
+{
+    updateEditorActionButtons();
 }
 
 void MainWindow::onAddParameterClicked()
@@ -1249,12 +2227,13 @@ void MainWindow::onAddParameterClicked()
     const QSignalBlocker blocker(ui->parametersTable);
     const int row = ui->parametersTable->rowCount();
     ui->parametersTable->insertRow(row);
-    ui->parametersTable->setItem(row, 0, new QTableWidgetItem("int"));
-    ui->parametersTable->setItem(row, 1, new QTableWidgetItem(QString("arg%1").arg(row + 1)));
-    ui->parametersTable->setItem(row, 2, new QTableWidgetItem(QString()));
-    ui->parametersTable->setItem(row, 3, new QTableWidgetItem("No"));
+    ui->parametersTable->setItem(row, 0, createEditableItem("int"));
+    ui->parametersTable->setItem(row, 1, createEditableItem(QString("arg%1").arg(row + 1)));
+    ui->parametersTable->setItem(row, 2, createReadOnlyItem(defaultValueForType("int")));
+    ui->parametersTable->setItem(row, 3, createEditableItem("No"));
     ui->parametersTable->setCurrentCell(row, 0);
     syncSelectedFunctionParameters();
+    updateValidationFeedback();
 }
 
 void MainWindow::onDeleteParameterClicked()
@@ -1266,6 +2245,7 @@ void MainWindow::onDeleteParameterClicked()
 
     ui->parametersTable->removeRow(ui->parametersTable->currentRow());
     syncSelectedFunctionParameters();
+    updateValidationFeedback();
 }
 
 void MainWindow::loadParameterEditorFromSelectedFunction()
@@ -1282,10 +2262,10 @@ void MainWindow::loadParameterEditorFromSelectedFunction()
     ui->parametersTable->setRowCount(parameters.count());
     for (int index = 0; index < parameters.count(); ++index) {
         const ParamMeta &param = parameters.at(index);
-        ui->parametersTable->setItem(index, 0, new QTableWidgetItem(param.type));
-        ui->parametersTable->setItem(index, 1, new QTableWidgetItem(param.name));
-        ui->parametersTable->setItem(index, 2, new QTableWidgetItem(param.defaultValue));
-        ui->parametersTable->setItem(index, 3, new QTableWidgetItem(param.isConstRef ? "Yes" : "No"));
+        ui->parametersTable->setItem(index, 0, createEditableItem(param.type));
+        ui->parametersTable->setItem(index, 1, createEditableItem(param.name));
+        ui->parametersTable->setItem(index, 2, createReadOnlyItem(param.defaultValue.isEmpty() ? defaultValueForType(param.type) : param.defaultValue));
+        ui->parametersTable->setItem(index, 3, createEditableItem(param.isConstRef ? "Yes" : "No"));
     }
 }
 
@@ -1329,9 +2309,15 @@ void MainWindow::syncSelectedFunctionParameters()
         ParamMeta param;
         param.type = typeItem->text().trimmed();
         param.name = nameItem->text().trimmed();
-        param.defaultValue = ui->parametersTable->item(index, 2) ? ui->parametersTable->item(index, 2)->text().trimmed() : QString();
+        param.defaultValue = defaultValueForType(param.type);
         param.isConstRef = ui->parametersTable->item(index, 3) && ui->parametersTable->item(index, 3)->text().compare("Yes", Qt::CaseInsensitive) == 0;
         parameters.append(param);
+
+        if (QTableWidgetItem *defaultItem = ui->parametersTable->item(index, 2)) {
+            defaultItem->setText(param.defaultValue);
+        } else {
+            ui->parametersTable->setItem(index, 2, createReadOnlyItem(param.defaultValue));
+        }
     }
 
     if (QTableWidgetItem *nameItem = ui->functionsTable->item(row, 0)) {
@@ -1342,7 +2328,7 @@ void MainWindow::syncSelectedFunctionParameters()
     if (QTableWidgetItem *paramsItem = ui->functionsTable->item(row, 2)) {
         paramsItem->setText(parameterSummary(parameters));
     } else {
-        ui->functionsTable->setItem(row, 2, new QTableWidgetItem(parameterSummary(parameters)));
+        ui->functionsTable->setItem(row, 2, createReadOnlyItem(parameterSummary(parameters)));
     }
 
     refreshPreview();
@@ -1379,6 +2365,55 @@ void MainWindow::syncSelectedFunctionFlags()
         accessItem->setText(normalizeAccessSpecifier(ui->funcAccessCombo->currentText(), "public"));
     } else {
         ui->functionsTable->setItem(row, 6, new QTableWidgetItem(normalizeAccessSpecifier(ui->funcAccessCombo->currentText(), "public")));
+    }
+
+    refreshPreview();
+    persistProjectModel();
+}
+
+void MainWindow::loadMemberOptionsFromSelectedMember()
+{
+    const QSignalBlocker accessBlocker(ui->memberAccessCombo);
+    const QSignalBlocker staticBlocker(ui->memberStaticCheck);
+    const QSignalBlocker constexprBlocker(ui->memberConstexprCheck);
+
+    const int row = ui->membersTable->currentRow();
+    if (row < 0) {
+        ui->memberAccessCombo->setCurrentText("private");
+        ui->memberStaticCheck->setChecked(false);
+        ui->memberConstexprCheck->setChecked(false);
+        return;
+    }
+
+    ui->memberAccessCombo->setCurrentText(normalizeAccessSpecifier(ui->membersTable->item(row, 3) ? ui->membersTable->item(row, 3)->text() : QString(), "private"));
+    ui->memberStaticCheck->setChecked(ui->membersTable->item(row, 4) && yesNoToBool(ui->membersTable->item(row, 4)->text()));
+    ui->memberConstexprCheck->setChecked(ui->membersTable->item(row, 5) && yesNoToBool(ui->membersTable->item(row, 5)->text()));
+}
+
+void MainWindow::syncSelectedMemberFlags()
+{
+    const int row = ui->membersTable->currentRow();
+    if (row < 0) {
+        return;
+    }
+
+    const QSignalBlocker blocker(ui->membersTable);
+    if (QTableWidgetItem *accessItem = ui->membersTable->item(row, 3)) {
+        accessItem->setText(normalizeAccessSpecifier(ui->memberAccessCombo->currentText(), "private"));
+    } else {
+        ui->membersTable->setItem(row, 3, createEditableItem(normalizeAccessSpecifier(ui->memberAccessCombo->currentText(), "private")));
+    }
+
+    if (QTableWidgetItem *staticItem = ui->membersTable->item(row, 4)) {
+        staticItem->setText(boolToYesNo(ui->memberStaticCheck->isChecked()));
+    } else {
+        ui->membersTable->setItem(row, 4, createEditableItem(boolToYesNo(ui->memberStaticCheck->isChecked())));
+    }
+
+    if (QTableWidgetItem *constexprItem = ui->membersTable->item(row, 5)) {
+        constexprItem->setText(boolToYesNo(ui->memberConstexprCheck->isChecked()));
+    } else {
+        ui->membersTable->setItem(row, 5, createEditableItem(boolToYesNo(ui->memberConstexprCheck->isChecked())));
     }
 
     refreshPreview();
@@ -1533,9 +2568,194 @@ bool MainWindow::loadProjectModel(const QString &rootPath)
         }
     }
 
+    const bool reconciled = reconcileModelWithFilesystem();
+    refreshTreePresentation();
     ui->treeView->expandAll();
     ui->logEdit->append(QString("Loaded project metadata from: %1").arg(QDir::toNativeSeparators(metadataPath)));
+    if (reconciled) {
+        persistProjectModel();
+    }
     statusBar()->showMessage("Project model loaded", 3000);
+    return true;
+}
+
+bool MainWindow::reconcileModelWithFilesystem()
+{
+    bool changed = false;
+    bool currentClassRemoved = false;
+
+    for (int row = 0; row < m_model->rowCount(); ++row) {
+        QStandardItem *domainItem = m_model->item(row);
+        if (!domainItem || domainItem->data(RoleType).toString() != "Domain") {
+            continue;
+        }
+
+        const QString domainKey = domainItem->data(RoleName).toString();
+        QDir domainDir(QDir(m_projectRootPath).filePath(domainKey));
+
+        QSet<QString> knownClasses;
+        for (int childRow = 0; childRow < domainItem->rowCount(); ++childRow) {
+            QStandardItem *classItem = domainItem->child(childRow);
+            if (classItem && classItem->data(RoleType).toString() == "Class") {
+                knownClasses.insert(classItem->data(RoleName).toString());
+            }
+        }
+
+        for (int childRow = domainItem->rowCount() - 1; childRow >= 0; --childRow) {
+            QStandardItem *classItem = domainItem->child(childRow);
+            if (!classItem || classItem->data(RoleType).toString() != "Class") {
+                continue;
+            }
+
+            const QString className = classItem->data(RoleName).toString();
+            const bool hasHeader = domainDir.exists(className + ".h") || domainDir.exists(className + ".hpp");
+            const bool hasSource = domainDir.exists(className + ".cpp") || domainDir.exists(className + ".cc") || domainDir.exists(className + ".cxx");
+            if (hasHeader || hasSource) {
+                changed = syncClassItemFromFilesystem(classItem) || changed;
+                continue;
+            }
+
+            if (classItem == m_currentClassItem) {
+                currentClassRemoved = true;
+            }
+
+            domainItem->removeRow(childRow);
+            ui->logEdit->append(QString("Removed missing class from model: %1/%2").arg(domainKey, className));
+            changed = true;
+            knownClasses.remove(className);
+        }
+
+        const QFileInfoList headerFiles = domainDir.entryInfoList({"*.h", "*.hpp"}, QDir::Files, QDir::Name);
+        for (const QFileInfo &headerFile : headerFiles) {
+            const QString className = headerFile.completeBaseName();
+            if (knownClasses.contains(className)) {
+                continue;
+            }
+
+            QString sourcePath;
+            for (const QString &extension : {QString("cpp"), QString("cc"), QString("cxx")}) {
+                const QString candidate = domainDir.filePath(className + "." + extension);
+                if (QFile::exists(candidate)) {
+                    sourcePath = candidate;
+                    break;
+                }
+            }
+            if (sourcePath.isEmpty()) {
+                continue;
+            }
+
+            QFile headerSource(headerFile.absoluteFilePath());
+            QFile sourceFile(sourcePath);
+            if (!headerSource.open(QIODevice::ReadOnly | QIODevice::Text) || !sourceFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                continue;
+            }
+
+            const QString headerContent = QString::fromUtf8(headerSource.readAll());
+            const QString sourceContent = QString::fromUtf8(sourceFile.readAll());
+            if (!isManagedGeneratedClassFileSet(headerContent, sourceContent, domainKey)) {
+                continue;
+            }
+
+            ClassMeta meta = parseManagedClassMetaFromFiles(headerContent, domainKey);
+            if (meta.className.isEmpty() || meta.className != className) {
+                continue;
+            }
+
+            QStandardItem *classItem = new QStandardItem(meta.className);
+            classItem->setData(meta.className, RoleName);
+            classItem->setData("Class", RoleType);
+            classItem->setData(domainKey, RoleDomain);
+            classItem->setData(meta.baseClass, RoleBaseClass);
+            saveClassInfoToNode(classItem, meta);
+            domainItem->appendRow(classItem);
+            knownClasses.insert(meta.className);
+            ui->logEdit->append(QString("Imported managed class from disk: %1/%2").arg(domainKey, meta.className));
+            changed = true;
+        }
+    }
+
+    if (currentClassRemoved) {
+        clearClassInfoPanel();
+        m_currentClassItem = nullptr;
+    }
+
+    return changed;
+}
+
+bool MainWindow::tryLoadManagedClassMetaFromFilesystem(QStandardItem *classItem, ClassMeta *meta) const
+{
+    if (!classItem || !meta || classItem->data(RoleType).toString() != "Class") {
+        return false;
+    }
+
+    const QString domainKey = classItem->data(RoleDomain).toString();
+    const QString className = classItem->data(RoleName).toString();
+    if (domainKey.isEmpty() || className.isEmpty() || m_projectRootPath.isEmpty()) {
+        return false;
+    }
+
+    const QDir domainDir(QDir(m_projectRootPath).filePath(domainKey));
+    QString headerPath;
+    for (const QString &extension : {QString("h"), QString("hpp")}) {
+        const QString candidate = domainDir.filePath(className + "." + extension);
+        if (QFile::exists(candidate)) {
+            headerPath = candidate;
+            break;
+        }
+    }
+
+    QString sourcePath;
+    for (const QString &extension : {QString("cpp"), QString("cc"), QString("cxx")}) {
+        const QString candidate = domainDir.filePath(className + "." + extension);
+        if (QFile::exists(candidate)) {
+            sourcePath = candidate;
+            break;
+        }
+    }
+
+    if (headerPath.isEmpty() || sourcePath.isEmpty()) {
+        return false;
+    }
+
+    QFile headerFile(headerPath);
+    QFile sourceFile(sourcePath);
+    if (!headerFile.open(QIODevice::ReadOnly | QIODevice::Text) || !sourceFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return false;
+    }
+
+    const QString headerContent = QString::fromUtf8(headerFile.readAll());
+    const QString sourceContent = QString::fromUtf8(sourceFile.readAll());
+    if (!isManagedGeneratedClassFileSet(headerContent, sourceContent, domainKey)) {
+        return false;
+    }
+
+    ClassMeta parsed = parseManagedClassMetaFromFiles(headerContent, domainKey);
+    if (parsed.className.isEmpty() || parsed.className != className) {
+        return false;
+    }
+
+    *meta = parsed;
+    return true;
+}
+
+bool MainWindow::syncClassItemFromFilesystem(QStandardItem *classItem)
+{
+    if (!classItem || classItem->data(RoleType).toString() != "Class") {
+        return false;
+    }
+
+    ClassMeta diskMeta;
+    if (!tryLoadManagedClassMetaFromFilesystem(classItem, &diskMeta)) {
+        return false;
+    }
+
+    const ClassMeta cachedMeta = classMetaFromItem(classItem);
+    if (QJsonDocument(classMetaToJsonObject(cachedMeta)).toJson(QJsonDocument::Compact)
+        == QJsonDocument(classMetaToJsonObject(diskMeta)).toJson(QJsonDocument::Compact)) {
+        return false;
+    }
+
+    saveClassInfoToNode(classItem, diskMeta);
     return true;
 }
 
